@@ -4,10 +4,10 @@ using UnityEngine.Rendering;
 
 /// <summary>
 /// FFT 海浪模拟：3 个级联（大浪 / 中浪 / 细碎波纹），每帧在 GPU 上跑一遍 IFFT，
-/// 结果以全局纹理的形式交给 HPOcean/Water 着色器使用。
+/// 结果以全局纹理的形式交给 PLOcean/Sea 着色器使用。
 /// </summary>
 [ExecuteAlways]
-public class HPOceanSimulation : MonoBehaviour
+public class PLOceanSimulation : MonoBehaviour
 {
     const int Size = 256;
     const int CascadeCount = 3;
@@ -78,9 +78,9 @@ public class HPOceanSimulation : MonoBehaviour
     RenderTexture _causticAccum, _causticResult;
     bool _causticHistoryValid;
 
-    static readonly int s_Caustics = Shader.PropertyToID("_HPOceanCaustics");
-    static readonly int s_CausticParams = Shader.PropertyToID("_HPOceanCausticParams");
-    static readonly int s_CausticDepths = Shader.PropertyToID("_HPOceanCausticDepths");
+    static readonly int s_Caustics = Shader.PropertyToID("_PLOceanCaustics");
+    static readonly int s_CausticParams = Shader.PropertyToID("_PLOceanCausticParams");
+    static readonly int s_CausticDepths = Shader.PropertyToID("_PLOceanCausticDepths");
 
     readonly Cascade[] _cascades = new Cascade[CascadeCount];
     RenderTexture _pingA, _pingB, _pongA, _pongB;
@@ -90,8 +90,24 @@ public class HPOceanSimulation : MonoBehaviour
     float _simTime;
     int _paramsHash;
 
-    static readonly int s_LengthScales = Shader.PropertyToID("_HPOceanLengthScales");
-    static readonly int s_OceanTime = Shader.PropertyToID("_HPOceanTime");
+    static readonly int s_LengthScales = Shader.PropertyToID("_PLOceanLengthScales");
+    static readonly int s_OceanTime = Shader.PropertyToID("_PLOceanTime");
+    static readonly int s_Cascade1Fade = Shader.PropertyToID("_Cascade1Fade");
+    static readonly int s_Cascade2Fade = Shader.PropertyToID("_Cascade2Fade");
+
+    // CPU 端水面高度（浮力用）：位移纹理每一级 mip 异步回读，按顶点着色器的方式采样
+    const int ReadbackMips = 9;   // 256 → 1
+    public static PLOceanSimulation Active { get; private set; }
+    ushort[][][] _cpuDisp;        // [级联][mip][texel * 4]，half
+    bool[][] _cpuValid;
+    bool _cpuReady;
+    int _pendingReadbacks;
+    float _lastQueryTime = float.NegativeInfinity;
+    System.Action<AsyncGPUReadbackRequest>[][] _readbackCallbacks;
+    SeaMesh _seaMesh;
+    int _queryFrame = -1;
+    Vector3 _queryCamPos;
+    float _queryFade1, _queryFade2;
 
     class Cascade
     {
@@ -109,10 +125,10 @@ public class HPOceanSimulation : MonoBehaviour
 
     void OnEnable()
     {
-        _compute = Resources.Load<ComputeShader>("HPOceanFFT");
+        _compute = Resources.Load<ComputeShader>("PLOceanFFT");
         if (_compute == null)
         {
-            Debug.LogError("HPOcean: 找不到 Resources/HPOceanFFT.compute");
+            Debug.LogError("PLOcean: 找不到 Resources/PLOceanFFT.compute");
             enabled = false;
             return;
         }
@@ -123,45 +139,50 @@ public class HPOceanSimulation : MonoBehaviour
         _kVertical = _compute.FindKernel("IFFTVertical");
         _kAssemble = _compute.FindKernel("Assemble");
 
-        _pingA = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "HPOcean_PingA");
-        _pingB = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "HPOcean_PingB");
-        _pongA = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "HPOcean_PongA");
-        _pongB = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "HPOcean_PongB");
+        _pingA = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "PLOcean_PingA");
+        _pingB = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "PLOcean_PingB");
+        _pongA = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "PLOcean_PongA");
+        _pongB = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, "PLOcean_PongB");
 
         for (int i = 0; i < CascadeCount; i++)
         {
             _cascades[i] = new Cascade
             {
-                h0 = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, $"HPOcean_H0_{i}"),
-                displacement = CreateRT(GraphicsFormat.R16G16B16A16_SFloat, true, $"HPOcean_Displacement_{i}"),
-                derivatives = CreateRT(GraphicsFormat.R16G16B16A16_SFloat, true, $"HPOcean_Derivatives_{i}"),
-                turbulence = CreateRT(GraphicsFormat.R32_SFloat, true, $"HPOcean_Turbulence_{i}"),
-                displacementId = Shader.PropertyToID($"_HPOceanDisplacement{i}"),
-                derivativesId = Shader.PropertyToID($"_HPOceanDerivatives{i}"),
-                turbulenceId = Shader.PropertyToID($"_HPOceanTurbulence{i}"),
+                h0 = CreateRT(GraphicsFormat.R32G32B32A32_SFloat, false, $"PLOcean_H0_{i}"),
+                displacement = CreateRT(GraphicsFormat.R16G16B16A16_SFloat, true, $"PLOcean_Displacement_{i}"),
+                derivatives = CreateRT(GraphicsFormat.R16G16B16A16_SFloat, true, $"PLOcean_Derivatives_{i}"),
+                turbulence = CreateRT(GraphicsFormat.R32_SFloat, true, $"PLOcean_Turbulence_{i}"),
+                displacementId = Shader.PropertyToID($"_PLOceanDisplacement{i}"),
+                derivativesId = Shader.PropertyToID($"_PLOceanDerivatives{i}"),
+                turbulenceId = Shader.PropertyToID($"_PLOceanTurbulence{i}"),
             };
         }
 
-        _causticCompute = Resources.Load<ComputeShader>("HPOceanCaustics");
+        _causticCompute = Resources.Load<ComputeShader>("PLOceanCaustics");
         if (_causticCompute != null)
         {
             _kCausticClear = _causticCompute.FindKernel("CausticClear");
             _kCausticSplat = _causticCompute.FindKernel("CausticSplat");
             _kCausticResolve = _causticCompute.FindKernel("CausticResolve");
-            _causticAccum = CreateArrayRT(GraphicsFormat.R32_UInt, "HPOcean_CausticAccum");
-            _causticResult = CreateArrayRT(GraphicsFormat.R32_SFloat, "HPOcean_Caustics");
+            _causticAccum = CreateArrayRT(GraphicsFormat.R32_UInt, "PLOcean_CausticAccum");
+            _causticResult = CreateArrayRT(GraphicsFormat.R32_SFloat, "PLOcean_Caustics");
             _causticHistoryValid = false;
         }
 
         _paramsHash = 0;
         _lastFrame = -1;
         _lastTime = CurrentTime();
+        InitReadback();
+        Active = this;
         RenderPipelineManager.beginContextRendering += OnBeginContextRendering;
     }
 
     void OnDisable()
     {
         RenderPipelineManager.beginContextRendering -= OnBeginContextRendering;
+        if (Active == this)
+            Active = null;
+        _cpuReady = false;
 
         Release(ref _pingA);
         Release(ref _pingB);
@@ -266,7 +287,173 @@ public class HPOceanSimulation : MonoBehaviour
         Shader.SetGlobalVector(s_LengthScales, new Vector4(lengthScale0, lengthScale1, lengthScale2, 0f));
         Shader.SetGlobalFloat(s_OceanTime, _simTime);
 
+        RequestReadback();
         SimulateCaustics();
+    }
+
+    // ------------------------------------------------------------------
+    // CPU 水面高度查询
+    // ------------------------------------------------------------------
+
+    /// <summary>世界 XZ 处的水面高度。没有海面或数据还没回读时返回 false。</summary>
+    public static bool TrySampleHeight(float x, float z, out float height)
+    {
+        var sim = Active;
+        if (sim == null)
+        {
+            height = 0f;
+            return false;
+        }
+        height = sim.SampleHeight(x, z);
+        return sim._cpuReady;
+    }
+
+    /// <summary>
+    /// 世界 XZ 处的水面高度，与顶点着色器保持一致：按到相机的距离选 mip、远处淡出小级联，
+    /// 并像 OceanHeightAt 那样反解水平位移。数据比画面晚 1~3 帧。
+    /// </summary>
+    public float SampleHeight(float x, float z)
+    {
+        _lastQueryTime = Time.realtimeSinceStartup;
+        float level = transform.position.y;
+        if (!_cpuReady)
+            return level;
+
+        // 相机位置和级联淡出距离每帧取一次
+        if (_queryFrame != Time.frameCount)
+        {
+            _queryFrame = Time.frameCount;
+            var cam = Camera.main;
+            _queryCamPos = cam != null ? cam.transform.position : transform.position;
+            _queryFade1 = 600f;
+            _queryFade2 = 150f;
+            if (_seaMesh != null && _seaMesh.seaMaterial != null)
+            {
+                _queryFade1 = Mathf.Max(_seaMesh.seaMaterial.GetFloat(s_Cascade1Fade), 1e-3f);
+                _queryFade2 = Mathf.Max(_seaMesh.seaMaterial.GetFloat(s_Cascade2Fade), 1e-3f);
+            }
+        }
+
+        float x0 = x, z0 = z;
+        for (int i = 0; i < 3; i++)
+        {
+            var d = DisplacementAt(x0, z0, level);
+            x0 = x - d.x;
+            z0 = z - d.z;
+        }
+        return level + DisplacementAt(x0, z0, level).y;
+    }
+
+    // 纹理坐标 (x, z) 处的位移，对应顶点着色器 Vert 里的三次采样
+    Vector3 DisplacementAt(float x, float z, float level)
+    {
+        float dist = Vector3.Distance(new Vector3(x, level, z), _queryCamPos);
+        float lodBase = Mathf.Log(Mathf.Max(dist * 0.0625f, 1e-4f) * 256f, 2f);
+        float w1 = Mathf.Clamp01(1f - dist / _queryFade1);
+        float w2 = Mathf.Clamp01(1f - dist / _queryFade2);
+
+        Vector3 d = SampleCascade(0, x, z, lodBase);
+        if (w1 > 0f)
+            d += SampleCascade(1, x, z, lodBase) * w1;
+        if (w2 > 0f)
+            d += SampleCascade(2, x, z, lodBase) * w2;
+        return d;
+    }
+
+    Vector3 SampleCascade(int cascade, float x, float z, float lodBase)
+    {
+        float length = _cascades[cascade].lengthScale;
+        float lod = Mathf.Clamp(lodBase - Mathf.Log(length, 2f), 0f, ReadbackMips - 1);
+        int m0 = Mathf.FloorToInt(lod);
+        int m1 = Mathf.Min(m0 + 1, ReadbackMips - 1);
+        float u = x / length, v = z / length;
+        var a = Bilinear(_cpuDisp[cascade][m0], Size >> m0, u, v);
+        if (m1 == m0)
+            return a;
+        return Vector3.Lerp(a, Bilinear(_cpuDisp[cascade][m1], Size >> m1, u, v), lod - m0);
+    }
+
+    // 与 GPU 的 repeat + bilinear 采样一致
+    static Vector3 Bilinear(ushort[] data, int size, float u, float v)
+    {
+        float fx = u * size - 0.5f, fy = v * size - 0.5f;
+        int ix = Mathf.FloorToInt(fx), iy = Mathf.FloorToInt(fy);
+        float tx = fx - ix, ty = fy - iy;
+        int mask = size - 1;
+        int x0 = ix & mask, x1 = (ix + 1) & mask;
+        int y0 = iy & mask, y1 = (iy + 1) & mask;
+        var bottom = Vector3.Lerp(Texel(data, size, x0, y0), Texel(data, size, x1, y0), tx);
+        var top = Vector3.Lerp(Texel(data, size, x0, y1), Texel(data, size, x1, y1), tx);
+        return Vector3.Lerp(bottom, top, ty);
+    }
+
+    static Vector3 Texel(ushort[] data, int size, int x, int y)
+    {
+        int i = (y * size + x) * 4;
+        return new Vector3(Mathf.HalfToFloat(data[i]), Mathf.HalfToFloat(data[i + 1]), Mathf.HalfToFloat(data[i + 2]));
+    }
+
+    void InitReadback()
+    {
+        _seaMesh = GetComponent<SeaMesh>();
+        _cpuReady = false;
+        _pendingReadbacks = 0;
+        _cpuDisp = new ushort[CascadeCount][][];
+        _cpuValid = new bool[CascadeCount][];
+        _readbackCallbacks = new System.Action<AsyncGPUReadbackRequest>[CascadeCount][];
+        for (int c = 0; c < CascadeCount; c++)
+        {
+            _cpuDisp[c] = new ushort[ReadbackMips][];
+            _cpuValid[c] = new bool[ReadbackMips];
+            _readbackCallbacks[c] = new System.Action<AsyncGPUReadbackRequest>[ReadbackMips];
+            for (int m = 0; m < ReadbackMips; m++)
+            {
+                int size = Size >> m;
+                _cpuDisp[c][m] = new ushort[size * size * 4];
+                int ci = c, mi = m;
+                _readbackCallbacks[c][m] = r => OnReadback(r, ci, mi);
+            }
+        }
+    }
+
+    // 只有最近有人查询过高度才回读，避免没有浮力物体时白白占带宽
+    void RequestReadback()
+    {
+        if (!SystemInfo.supportsAsyncGPUReadback || Time.realtimeSinceStartup - _lastQueryTime > 2f)
+            return;
+        // 上一批还没回来就跳过，不让请求越积越多
+        if (_pendingReadbacks > 0)
+            return;
+        for (int c = 0; c < CascadeCount; c++)
+        {
+            for (int m = 0; m < ReadbackMips; m++)
+            {
+                _pendingReadbacks++;
+                AsyncGPUReadback.Request(_cascades[c].displacement, m, _readbackCallbacks[c][m]);
+            }
+        }
+    }
+
+    void OnReadback(AsyncGPUReadbackRequest request, int cascade, int mip)
+    {
+        _pendingReadbacks = Mathf.Max(_pendingReadbacks - 1, 0);
+        if (request.hasError || _cpuDisp == null)
+            return;
+        var data = request.GetData<ushort>();
+        var target = _cpuDisp[cascade][mip];
+        if (data.Length != target.Length)
+            return;
+        data.CopyTo(target);
+        _cpuValid[cascade][mip] = true;
+
+        if (!_cpuReady)
+        {
+            bool all = true;
+            for (int c = 0; c < CascadeCount && all; c++)
+                for (int m = 0; m < ReadbackMips && all; m++)
+                    all = _cpuValid[c][m];
+            _cpuReady = all;
+        }
     }
 
     // 焦散：在中浪级联的平铺域里追踪光子（细碎波纹太短，形成不了清晰的焦散线）

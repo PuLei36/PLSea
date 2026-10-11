@@ -7,7 +7,7 @@ using UnityEngine.Rendering;
 /// </summary>
 [ExecuteAlways]
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
-public class HPOceanBeach : MonoBehaviour
+public class PLOceanBeach : MonoBehaviour
 {
     [Header("尺寸")]
     [Min(1f)] public float sizeX = 240f;
@@ -82,7 +82,7 @@ public class HPOceanBeach : MonoBehaviour
     {
         if (_mesh == null)
         {
-            _mesh = new Mesh { name = "HPOceanBeach", hideFlags = HideFlags.DontSave };
+            _mesh = new Mesh { name = "PLOceanBeach", hideFlags = HideFlags.DontSave };
             GetComponent<MeshFilter>().sharedMesh = _mesh;
         }
 

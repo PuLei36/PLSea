@@ -9,7 +9,7 @@ using UnityEngine.Rendering;
 /// 细分后做了 2:1 平衡，并在粗细交界处插入边中点缝合，没有 T 型接缝，后面做顶点动画不会裂缝。
 /// </summary>
 [ExecuteAlways]
-public class WaterMesh : MonoBehaviour
+public class SeaMesh : MonoBehaviour
 {
     [Header("网格")]
     [Tooltip("最内层（最密）网格单元的边长，单位米")]
@@ -25,7 +25,7 @@ public class WaterMesh : MonoBehaviour
     [Min(1f)] public float outerRadius = 1500f;
 
     [Header("渲染")]
-    public Material waterMaterial;
+    public Material seaMaterial;
 
     [Tooltip("网格中心放在相机前方多远的位置")]
     public float forwardOffset = 10f;
@@ -40,8 +40,8 @@ public class WaterMesh : MonoBehaviour
     bool _dirty = true;
     MaterialPropertyBlock _props;
 
-    static readonly int s_WaterLevel = Shader.PropertyToID("_HPOceanWaterLevel");
-    static readonly int s_CameraId = Shader.PropertyToID("_HPOceanCameraId");
+    static readonly int s_SeaLevel = Shader.PropertyToID("_PLOceanSeaLevel");
+    static readonly int s_CameraId = Shader.PropertyToID("_PLOceanCameraId");
 
     public Mesh Mesh
     {
@@ -49,7 +49,7 @@ public class WaterMesh : MonoBehaviour
         {
             if (_mesh == null)
             {
-                _mesh = new Mesh { name = "WaterLodMesh", hideFlags = HideFlags.DontSave };
+                _mesh = new Mesh { name = "SeaLodMesh", hideFlags = HideFlags.DontSave };
                 _dirty = true;
             }
             if (_dirty)
@@ -90,7 +90,7 @@ public class WaterMesh : MonoBehaviour
     {
         if (cam.cameraType == CameraType.Preview)
             return;
-        if (waterMaterial == null)
+        if (seaMaterial == null)
             return;
 
         // 网格中心放到相机前方，并按步长对齐，避免顶点随相机移动而滑动
@@ -101,13 +101,13 @@ public class WaterMesh : MonoBehaviour
         center.y = transform.position.y;
 
         // 水面高度给水下 Pass 用；相机编号让水面只使用属于自己相机的体积缓冲
-        Shader.SetGlobalFloat(s_WaterLevel, transform.position.y);
+        Shader.SetGlobalFloat(s_SeaLevel, transform.position.y);
         _props ??= new MaterialPropertyBlock();
-        _props.SetFloat(s_CameraId, HPOceanCameraIds.Get(cam));
+        _props.SetFloat(s_CameraId, PLOceanCameraIds.Get(cam));
 
         Graphics.DrawMesh(Mesh,
             Matrix4x4.TRS(center, Quaternion.identity, Vector3.one),
-            waterMaterial,
+            seaMaterial,
             gameObject.layer,
             cam,
             0,
@@ -362,12 +362,12 @@ public class WaterMesh : MonoBehaviour
     [ContextMenu("Save Mesh As Asset")]
     void SaveMeshAsset()
     {
-        string path = UnityEditor.AssetDatabase.GenerateUniqueAssetPath("Assets/WaterLodMesh.asset");
+        string path = UnityEditor.AssetDatabase.GenerateUniqueAssetPath("Assets/SeaLodMesh.asset");
         var copy = Instantiate(Mesh);
         copy.hideFlags = HideFlags.None;
         UnityEditor.AssetDatabase.CreateAsset(copy, path);
         UnityEditor.AssetDatabase.SaveAssets();
-        Debug.Log($"Water mesh saved to {path}");
+        Debug.Log($"Sea mesh saved to {path}");
     }
 #endif
 }

@@ -1,4 +1,4 @@
-// HPOcean 焦散（参考 HPWater 的 HPWaterCausticCompute）
+// PLOcean 焦散（参考 HPWater 的 HPWaterCausticCompute）
 // HPWater 在光源视角的级联图集里追踪；这里改为在 FFT 中浪级联的平铺域里追踪，结果可无缝平铺到任意水底：
 //   CausticClear    清空累积纹理
 //   CausticSplat    每个光子从水面出发，按真实法线折射，落到 3 个参考深度上，双线性 InterlockedAdd 累积

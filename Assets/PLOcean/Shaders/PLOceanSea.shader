@@ -1,4 +1,4 @@
-// HPOcean 水面着色器（HDRP 14，前向透明，独立 Shader 不改 HDRP 包）
+// PLOcean 水面着色器（HDRP 14，前向透明，独立 Shader 不改 HDRP 包）
 //
 // 光照模型参考 HPWater 的水体 BSDF：
 //   diffR  宏观体积散射：入射菲涅尔 × NdotL × 水下单次散射（沿折射光线指数步进，逐点采样太阳阴影 → 水下光柱）
@@ -6,15 +6,15 @@
 //   出射   (1 - F(NdotV)) 统一作用于水体散射光和透射的水下场景
 //   表面   GGX 高光（方向光 + 点光/聚光）+ 反射（SSR → 反射探针 → 天空，按层级权重回退）
 //   折射   只取法线带来的扰动；可选指数步进光线追踪（IGN 抖动 + 厚度判定），按水下光程做 mip 模糊和色散
-//   焦散   HPOceanSimulation 里光子追踪得到的焦散图，按水底深度采样
+//   焦散   PLOceanSimulation 里光子追踪得到的焦散图，按水底深度采样
 //   泡沫   FFT Jacobian 累积的湍流 + 物体边缘泡沫
 //
 // Pass：
 //   TransparentDepthPrepass  写深度、法线（给透明 SSR）、模板（SSR 位 + 水面位）
 //   ForwardOnly              水面着色（正面从水上看，背面从水下看）
-//   HPOceanVolume            低分辨率体积散射 + 时域重投影（由 HPOceanVolumePass 调用）
-//   HPOceanUnderwater        水下视角的雾、光柱、焦散（由 HPOceanUnderwaterPass 调用）
-Shader "HPOcean/Water"
+//   PLOceanVolume            低分辨率体积散射 + 时域重投影（由 PLOceanVolumePass 调用）
+//   PLOceanUndersea        水下视角的雾、光柱、焦散（由 PLOceanUnderseaPass 调用）
+Shader "PLOcean/Sea"
 {
     Properties
     {
@@ -39,7 +39,7 @@ Shader "HPOcean/Water"
         _RefractionStrength ("Refraction Strength", Range(0, 2)) = 1
         _ForwardScatterBlur ("Forward Scatter Blur", Range(0, 2)) = 0.3
         _Dispersion ("Chromatic Dispersion", Range(0, 2)) = 0.4
-        [Toggle(_HPO_RAYMARCH_REFRACTION)] _RefractionRayMarch ("Ray Marched Refraction", Float) = 1
+        [Toggle(_PLO_RAYMARCH_REFRACTION)] _RefractionRayMarch ("Ray Marched Refraction", Float) = 1
         [IntRange] _RefractionSteps ("Ray March Steps", Range(2, 24)) = 8
         _RefractionMaxDistance ("Ray March Max Distance (m)", Float) = 30
         _RefractionThickness ("Ray March Thickness (m)", Float) = 0.5
@@ -74,9 +74,9 @@ Shader "HPOcean/Water"
         _EdgeFoamTiling ("Edge Foam Tiling (1/m)", Float) = 0.35
         _EdgeFoamContact ("Edge Contact Line", Range(0, 1)) = 0.5
 
-        [Header(Underwater)]
-        _UnderwaterFogDensity ("Underwater Fog Density Scale", Range(0, 4)) = 1
-        _UnderwaterGodRays ("Underwater Light Shafts", Range(0, 4)) = 1
+        [Header(Undersea)]
+        _UnderseaFogDensity ("Undersea Fog Density Scale", Range(0, 4)) = 1
+        _UnderseaGodRays ("Undersea Light Shafts", Range(0, 4)) = 1
 
         [Header(Interactive Ripples)]
         _RippleHeightScale ("Ripple Height Scale", Range(0, 4)) = 1
@@ -142,8 +142,8 @@ Shader "HPOcean/Water"
         float _EdgeFoamIntensity;
         float _EdgeFoamTiling;
         float _EdgeFoamContact;
-        float _UnderwaterFogDensity;
-        float _UnderwaterGodRays;
+        float _UnderseaFogDensity;
+        float _UnderseaGodRays;
         float _Cascade1Fade;
         float _Cascade2Fade;
         float _RippleHeightScale;
@@ -160,57 +160,88 @@ Shader "HPOcean/Water"
     #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/LightLoop/LightLoopDef.hlsl"
     #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Lighting/LightEvaluation.hlsl"
 
-    // FFT 模拟结果（HPOceanSimulation 以全局纹理形式设置）
-    TEXTURE2D(_HPOceanDisplacement0);
-    TEXTURE2D(_HPOceanDisplacement1);
-    TEXTURE2D(_HPOceanDisplacement2);
-    TEXTURE2D(_HPOceanDerivatives0);
-    TEXTURE2D(_HPOceanDerivatives1);
-    TEXTURE2D(_HPOceanDerivatives2);
-    TEXTURE2D(_HPOceanTurbulence0);
-    TEXTURE2D(_HPOceanTurbulence1);
-    TEXTURE2D(_HPOceanTurbulence2);
-    SAMPLER(sampler_HPOceanDerivatives0);
-    float4 _HPOceanLengthScales;
-    float _HPOceanTime;
-    float _HPOceanWaterLevel;
+    // FFT 模拟结果（PLOceanSimulation 以全局纹理形式设置）
+    TEXTURE2D(_PLOceanDisplacement0);
+    TEXTURE2D(_PLOceanDisplacement1);
+    TEXTURE2D(_PLOceanDisplacement2);
+    TEXTURE2D(_PLOceanDerivatives0);
+    TEXTURE2D(_PLOceanDerivatives1);
+    TEXTURE2D(_PLOceanDerivatives2);
+    TEXTURE2D(_PLOceanTurbulence0);
+    TEXTURE2D(_PLOceanTurbulence1);
+    TEXTURE2D(_PLOceanTurbulence2);
+    SAMPLER(sampler_PLOceanDerivatives0);
+    float4 _PLOceanLengthScales;
+    float _PLOceanTime;
+    float _PLOceanSeaLevel;
 
-    // 焦散（HPOceanSimulation）：x = 平铺尺寸，y = 是否可用，z = 图案放大倍数；深度切片 xyz
-    TEXTURE2D_ARRAY(_HPOceanCaustics);
-    float4 _HPOceanCausticParams;
-    float4 _HPOceanCausticDepths;
+    // 焦散（PLOceanSimulation）：x = 平铺尺寸，y = 是否可用，z = 图案放大倍数；深度切片 xyz
+    TEXTURE2D_ARRAY(_PLOceanCaustics);
+    float4 _PLOceanCausticParams;
+    float4 _PLOceanCausticDepths;
 
-    // 低分辨率体积散射（HPOceanVolumePass）
-    TEXTURE2D_X(_HPOceanVolumeTex);
-    TEXTURE2D_X(_HPOceanVolumeHistory);
-    float4 _HPOceanVolumeSize;    // 低分辨率宽高及倒数
-    float4 _HPOceanVolumeParams;  // x = 历史有效，y = 历史权重
-    float _HPOceanVolumeOwner;    // 当前体积缓冲属于哪个相机
-    float _HPOceanCameraId;       // 本次绘制的相机（WaterMesh 用 MaterialPropertyBlock 设置）
+    // 低分辨率体积散射（PLOceanVolumePass）
+    TEXTURE2D_X(_PLOceanVolumeTex);
+    TEXTURE2D_X(_PLOceanVolumeHistory);
+    float4 _PLOceanVolumeSize;    // 低分辨率宽高及倒数
+    float4 _PLOceanVolumeParams;  // x = 历史有效，y = 历史权重
+    float _PLOceanVolumeOwner;    // 当前体积缓冲属于哪个相机
+    float _PLOceanCameraId;       // 本次绘制的相机（SeaMesh 用 MaterialPropertyBlock 设置）
     // 全屏 Pass 读取的相机缓冲（Custom Pass 绑定）
-    TEXTURE2D_X(_HPOceanDepthBuffer);
-    TEXTURE2D_X_UINT2(_HPOceanStencil);
-    TEXTURE2D_X(_HPOceanSceneColorCopy);
+    TEXTURE2D_X(_PLOceanDepthBuffer);
+    TEXTURE2D_X_UINT2(_PLOceanStencil);
+    TEXTURE2D_X(_PLOceanSceneColorCopy);
 
-    // 交互水波（HPOceanRipple）：xy = 区域左下角世界 XZ，z = 边长，w = 像素尺寸；z = 0 表示关闭
-    TEXTURE2D(_HPOceanRipple);
-    float4 _HPOceanRippleParams;
+    // 交互水波（PLOceanRipple）：xy = 区域左下角世界 XZ，z = 边长，w = 像素尺寸；z = 0 表示关闭
+    TEXTURE2D(_PLOceanRipple);
+    float4 _PLOceanRippleParams;
 
     TEXTURE2D(_FoamMap);
     TEXTURE2D(_ScatterRamp);
 
-    #define HPO_SAMPLE_COUNT 6
-    #define HPO_EXP_FACTOR 12.0
-    #define HPO_ETA (1.0 / 1.33)
-    #define HPO_F0 0.02
-    #define HPO_SSS_PATH_SCALE 20.0
-    #define HPO_SSS_NONLINEAR_STRENGTH 0.5
-    #define HPO_SSS_SCATTER_BOOST 2.0
-    #define HPO_BACKLIT_PATH_SCALE 20.0
-    #define HPO_WATER_BLUR_SCALE 0.2
-    #define HPO_BLUR_DENSITY_SCALE 10.0
-    #define HPO_REFRACTION_REFERENCE_DISTANCE 20.0
-    #define HPO_STENCIL_WATER 64   // STENCILUSAGE_USER_BIT0：标记水面正面像素
+    #define PLO_SAMPLE_COUNT 6
+    #define PLO_EXP_FACTOR 12.0
+    #define PLO_ETA (1.0 / 1.33)
+    #define PLO_F0 0.02
+    #define PLO_SSS_PATH_SCALE 20.0
+    #define PLO_SSS_NONLINEAR_STRENGTH 0.5
+    #define PLO_SSS_SCATTER_BOOST 2.0
+    #define PLO_BACKLIT_PATH_SCALE 20.0
+    #define PLO_SEA_BLUR_SCALE 0.2
+    #define PLO_BLUR_DENSITY_SCALE 10.0
+    #define PLO_REFRACTION_REFERENCE_DISTANCE 20.0
+    #define PLO_STENCIL_SEA 64   // STENCILUSAGE_USER_BIT0：标记水面正面像素
+
+    // 船舱遮罩（PLOceanBoat）：船舱内的水面直接 clip 掉，水不会“进船”
+    #define PLO_MAX_HULLS 4
+    #define PLO_MAX_STATIONS 16
+    float _PLOceanHullCount;
+    float4x4 _PLOceanHullWorldToLocal[PLO_MAX_HULLS];
+    float4 _PLOceanHullParams[PLO_MAX_HULLS];                         // x = zMin，y = zMax，z = 截面数
+    float4 _PLOceanHullStations[PLO_MAX_HULLS * PLO_MAX_STATIONS];    // x = 舱底，y = 船舷，z/w = 舱底/船舷半宽
+
+    // 世界坐标点是否在某条船的船舱里。船舷以上也算（浪头高过船舷时舱里同样不该出现水面）
+    bool InsideBoatHull(float3 positionAbs)
+    {
+        int count = (int)_PLOceanHullCount;
+        for (int h = 0; h < count; h++)
+        {
+            float3 p = mul(_PLOceanHullWorldToLocal[h], float4(positionAbs, 1.0)).xyz;
+            float4 prm = _PLOceanHullParams[h];
+            if (p.z < prm.x || p.z > prm.y)
+                continue;
+            float f = (p.z - prm.x) / (prm.y - prm.x) * (prm.z - 1.0);
+            int i = min((int)f, (int)prm.z - 2);
+            float4 s = lerp(_PLOceanHullStations[h * PLO_MAX_STATIONS + i],
+                            _PLOceanHullStations[h * PLO_MAX_STATIONS + i + 1], f - i);
+            if (p.y < s.x || s.y - s.x < 0.01)
+                continue;
+            float halfWidth = lerp(s.z, s.w, saturate((p.y - s.x) / (s.y - s.x)));
+            if (abs(p.x) < halfWidth)
+                return true;
+        }
+        return false;
+    }
 
     // ------------------------------------------------------------------
     // 工具
@@ -225,7 +256,7 @@ Shader "HPOcean/Water"
     }
 
     // 单次散射主导时保留方向性，多次散射时趋于各向同性
-    float WaterPhase(float cosTheta)
+    float SeaPhase(float cosTheta)
     {
         return lerp(HenyeyGreenstein(cosTheta, _PhaseG), 1.0 / (4.0 * PI), _MultiScatter);
     }
@@ -244,9 +275,9 @@ Shader "HPOcean/Water"
     }
 
     // 水下光程 → 颜色金字塔 mip（散射越强，越浅就越模糊）
-    float WaterBlurMip(float pathLength, float scatterDensity)
+    float SeaBlurMip(float pathLength, float scatterDensity)
     {
-        float scale = HPO_WATER_BLUR_SCALE + scatterDensity * _ForwardScatterBlur * HPO_BLUR_DENSITY_SCALE;
+        float scale = PLO_SEA_BLUR_SCALE + scatterDensity * _ForwardScatterBlur * PLO_BLUR_DENSITY_SCALE;
         return clamp(log2(1.0 + pathLength * scale), 0.0, min(6.0, _ColorPyramidLodCount));
     }
 
@@ -298,14 +329,14 @@ Shader "HPOcean/Water"
     // 顶点位移用：按网格单元边长选 mip，把比网格还细的波纹滤掉，否则粗网格上只剩孤立的尖三角
     float SampleRippleHeight(float2 xzAbs, float cellSize)
     {
-        if (_HPOceanRippleParams.z <= 0)
+        if (_PLOceanRippleParams.z <= 0)
             return 0.0;
-        float2 uv = (xzAbs - _HPOceanRippleParams.xy) / _HPOceanRippleParams.z;
+        float2 uv = (xzAbs - _PLOceanRippleParams.xy) / _PLOceanRippleParams.z;
         float fade = RippleFade(uv);
         if (fade <= 0.0)
             return 0.0;
-        float lod = max(log2(cellSize / _HPOceanRippleParams.w), 0.0);
-        return SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_trilinear_clamp_sampler, uv, lod).r * fade * _RippleHeightScale;
+        float lod = max(log2(cellSize / _PLOceanRippleParams.w), 0.0);
+        return SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_trilinear_clamp_sampler, uv, lod).r * fade * _RippleHeightScale;
     }
 
     Ripple SampleRipple(float2 xzAbs)
@@ -313,23 +344,23 @@ Shader "HPOcean/Water"
         Ripple r;
         r.height = 0;
         r.gradient = 0;
-        if (_HPOceanRippleParams.z <= 0)
+        if (_PLOceanRippleParams.z <= 0)
             return r;
 
-        float2 uv = (xzAbs - _HPOceanRippleParams.xy) / _HPOceanRippleParams.z;
+        float2 uv = (xzAbs - _PLOceanRippleParams.xy) / _PLOceanRippleParams.z;
         float fade = RippleFade(uv);
         if (fade <= 0.0)
             return r;
 
-        float texelUV = _HPOceanRippleParams.w / _HPOceanRippleParams.z;
-        float h  = SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_linear_clamp_sampler, uv, 0).r;
-        float hL = SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_linear_clamp_sampler, uv - float2(texelUV, 0), 0).r;
-        float hR = SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_linear_clamp_sampler, uv + float2(texelUV, 0), 0).r;
-        float hD = SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_linear_clamp_sampler, uv - float2(0, texelUV), 0).r;
-        float hU = SAMPLE_TEXTURE2D_LOD(_HPOceanRipple, s_linear_clamp_sampler, uv + float2(0, texelUV), 0).r;
+        float texelUV = _PLOceanRippleParams.w / _PLOceanRippleParams.z;
+        float h  = SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_linear_clamp_sampler, uv, 0).r;
+        float hL = SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_linear_clamp_sampler, uv - float2(texelUV, 0), 0).r;
+        float hR = SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_linear_clamp_sampler, uv + float2(texelUV, 0), 0).r;
+        float hD = SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_linear_clamp_sampler, uv - float2(0, texelUV), 0).r;
+        float hU = SAMPLE_TEXTURE2D_LOD(_PLOceanRipple, s_linear_clamp_sampler, uv + float2(0, texelUV), 0).r;
 
         r.height = h * fade * _RippleHeightScale;
-        r.gradient = float2(hR - hL, hU - hD) / (2.0 * _HPOceanRippleParams.w) * fade * _RippleNormalScale;
+        r.gradient = float2(hR - hL, hU - hD) / (2.0 * _PLOceanRippleParams.w) * fade * _RippleNormalScale;
         return r;
     }
 
@@ -346,11 +377,11 @@ Shader "HPOcean/Water"
     // xz = 纹理坐标（未位移），rippleXZ = 位移后的真实世界 XZ
     OceanSurface SampleOceanSurface(float2 xz, float2 rippleXZ, float dist)
     {
-        float3 Ls = _HPOceanLengthScales.xyz;
+        float3 Ls = _PLOceanLengthScales.xyz;
         float cascade2Weight = saturate(1.0 - dist / (_Cascade2Fade * 4.0));
-        float4 deriv = SAMPLE_TEXTURE2D(_HPOceanDerivatives0, sampler_HPOceanDerivatives0, xz / Ls.x)
-                     + SAMPLE_TEXTURE2D(_HPOceanDerivatives1, sampler_HPOceanDerivatives0, xz / Ls.y)
-                     + SAMPLE_TEXTURE2D(_HPOceanDerivatives2, sampler_HPOceanDerivatives0, xz / Ls.z) * cascade2Weight;
+        float4 deriv = SAMPLE_TEXTURE2D(_PLOceanDerivatives0, sampler_PLOceanDerivatives0, xz / Ls.x)
+                     + SAMPLE_TEXTURE2D(_PLOceanDerivatives1, sampler_PLOceanDerivatives0, xz / Ls.y)
+                     + SAMPLE_TEXTURE2D(_PLOceanDerivatives2, sampler_PLOceanDerivatives0, xz / Ls.z) * cascade2Weight;
         float2 slope = deriv.xy / max(1.0 + deriv.zw, 0.1) * _NormalStrength;
 
         // 交互水波叠加到斜率上
@@ -359,9 +390,9 @@ Shader "HPOcean/Water"
 
         OceanSurface s;
         s.normalWS = normalize(float3(-slope.x, 1.0, -slope.y));
-        s.turbulence = SAMPLE_TEXTURE2D(_HPOceanTurbulence0, sampler_HPOceanDerivatives0, xz / Ls.x).r
-                     + SAMPLE_TEXTURE2D(_HPOceanTurbulence1, sampler_HPOceanDerivatives0, xz / Ls.y).r
-                     + SAMPLE_TEXTURE2D(_HPOceanTurbulence2, sampler_HPOceanDerivatives0, xz / Ls.z).r * cascade2Weight * 0.5;
+        s.turbulence = SAMPLE_TEXTURE2D(_PLOceanTurbulence0, sampler_PLOceanDerivatives0, xz / Ls.x).r
+                     + SAMPLE_TEXTURE2D(_PLOceanTurbulence1, sampler_PLOceanDerivatives0, xz / Ls.y).r
+                     + SAMPLE_TEXTURE2D(_PLOceanTurbulence2, sampler_PLOceanDerivatives0, xz / Ls.z).r * cascade2Weight * 0.5;
         // 陡的波纹（被物体搅起来的水）带一点泡沫
         s.turbulence += saturate((length(ripple.gradient) - 0.5) * 0.6) * _RippleFoam;
         return s;
@@ -384,10 +415,10 @@ Shader "HPOcean/Water"
     // 纹理坐标 xz 处的三维位移（与顶点着色器在相机附近 mip0、级联权重 1 时一致）
     float3 OceanDisplacementAt(float2 xz)
     {
-        float3 Ls = _HPOceanLengthScales.xyz;
-        float3 d = SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement0, s_linear_repeat_sampler, xz / Ls.x, 0).xyz
-                 + SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement1, s_linear_repeat_sampler, xz / Ls.y, 0).xyz
-                 + SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement2, s_linear_repeat_sampler, xz / Ls.z, 0).xyz;
+        float3 Ls = _PLOceanLengthScales.xyz;
+        float3 d = SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement0, s_linear_repeat_sampler, xz / Ls.x, 0).xyz
+                 + SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement1, s_linear_repeat_sampler, xz / Ls.y, 0).xyz
+                 + SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement2, s_linear_repeat_sampler, xz / Ls.z, 0).xyz;
         d.y += SampleRipple(xz + d.xz).height;
         return d;
     }
@@ -401,7 +432,7 @@ Shader "HPOcean/Water"
         [unroll]
         for (int i = 0; i < 3; i++)
             x0 = xzAbs - OceanDisplacementAt(x0).xz;
-        return _HPOceanWaterLevel + OceanDisplacementAt(x0).y;
+        return _PLOceanSeaLevel + OceanDisplacementAt(x0).y;
     }
 
     // ------------------------------------------------------------------
@@ -457,7 +488,7 @@ Shader "HPOcean/Water"
         }
     }
 
-    // 水下体积采样用的廉价阴影：单级联 Gather PCF（参考 HPWater 的 EvalWater_CascadedDepth）
+    // 水下体积采样用的廉价阴影：单级联 Gather PCF（参考 HPWater 的 EvalSea_CascadedDepth）
     float SampleSunShadowCheap(DirectionalLightData light, float3 positionRWS)
     {
         if (light.shadowIndex < 0 || light.shadowDimmer <= 0)
@@ -497,10 +528,10 @@ Shader "HPOcean/Water"
     float3 SampleCaustics(float3 positionAbs, float depth, float3 L)
     {
         // 光子是按"平面折射"对齐生成的，水底点先沿平面折射方向找回对应的水面位置
-        float3 t0 = refract(-L, float3(0, 1, 0), HPO_ETA);
-        float2 uv = (positionAbs.xz - t0.xz / max(-t0.y, 0.1) * depth) / (_HPOceanCausticParams.x * max(_HPOceanCausticParams.z, 1.0));
+        float3 t0 = refract(-L, float3(0, 1, 0), PLO_ETA);
+        float2 uv = (positionAbs.xz - t0.xz / max(-t0.y, 0.1) * depth) / (_PLOceanCausticParams.x * max(_PLOceanCausticParams.z, 1.0));
 
-        float3 d = _HPOceanCausticDepths.xyz;
+        float3 d = _PLOceanCausticDepths.xyz;
         float s = depth <= d.y ? (depth - d.x) / (d.y - d.x) : 1.0 + (depth - d.y) / (d.z - d.y);
         s = clamp(s, 0.0, 2.0);
         float s0 = min(floor(s), 1.0);
@@ -509,12 +540,12 @@ Shader "HPOcean/Water"
         // 单通道焦散图上模拟色散：RGB 沿光线水平方向错开采样（HPWater 的单通道模式）
         float2 dispersion = normalize(L.xz + 1e-5) * (_CausticDispersion * 0.004 * depth);
         float3 c0, c1;
-        c0.r = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv + dispersion, s0, 0).r;
-        c0.g = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv, s0, 0).r;
-        c0.b = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv - dispersion, s0, 0).r;
-        c1.r = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv + dispersion, s0 + 1, 0).r;
-        c1.g = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv, s0 + 1, 0).r;
-        c1.b = SAMPLE_TEXTURE2D_ARRAY_LOD(_HPOceanCaustics, s_linear_repeat_sampler, uv - dispersion, s0 + 1, 0).r;
+        c0.r = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv + dispersion, s0, 0).r;
+        c0.g = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv, s0, 0).r;
+        c0.b = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv - dispersion, s0, 0).r;
+        c1.r = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv + dispersion, s0 + 1, 0).r;
+        c1.g = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv, s0 + 1, 0).r;
+        c1.b = SAMPLE_TEXTURE2D_ARRAY_LOD(_PLOceanCaustics, s_linear_repeat_sampler, uv - dispersion, s0 + 1, 0).r;
         float3 c = lerp(c0, c1, f);
         // 压缩对比度：均值 1 保持不变，亮线不再刺眼、暗格不再死黑，网格感弱很多
         c = log2(1.0 + max(c, 0.0));
@@ -526,7 +557,7 @@ Shader "HPOcean/Water"
     // 返回乘到水底颜色上的系数（平均为 1，只作用于被太阳照到的部分）
     float3 CausticModulation(float3 positionRWS, float depth, float3 L, float shadow, float viewDist)
     {
-        if (_HPOceanCausticParams.y <= 0 || depth <= 0)
+        if (_PLOceanCausticParams.y <= 0 || depth <= 0)
             return 1.0;
 
         float3 c = SampleCaustics(GetAbsolutePositionWS(positionRWS), depth, L);
@@ -560,20 +591,20 @@ Shader "HPOcean/Water"
         r.sceneRWS = ComputeWorldSpacePosition(screenUV, sceneDepthRaw, UNITY_MATRIX_I_VP);
 
         // 只保留法线带来的扰动：去掉平面折射，再加回指向场景点的方向
-        float3 flatRefract = refract(-V, float3(0, 1, 0), HPO_ETA);
+        float3 flatRefract = refract(-V, float3(0, 1, 0), PLO_ETA);
         float3 crossDir = r.sceneValid ? SafeNormalize(r.sceneRWS - positionRWS) : SafeNormalize(flatRefract);
         float crossLength = r.sceneValid ? min(distance(r.sceneRWS, positionRWS), _MaxCrossDistance) : 10.0;
 
         float3 gainedNormal = SafeNormalize(N * float3(_RefractionStrength, 1.0, _RefractionStrength));
-        float3 refractDir = SafeNormalize(refract(-V, gainedNormal, HPO_ETA) - flatRefract + crossDir);
+        float3 refractDir = SafeNormalize(refract(-V, gainedNormal, PLO_ETA) - flatRefract + crossDir);
         float2 refractUV = ComputeNormalizedDeviceCoordinates(positionRWS + refractDir * crossLength, UNITY_MATRIX_VP);
 
-    #if defined(_HPO_RAYMARCH_REFRACTION)
+    #if defined(_PLO_RAYMARCH_REFRACTION)
         // 指数步进找折射光线与场景的交点：近处密、远处疏，IGN 抖动起点消除断层，厚度阈值防止穿透
         {
             float maxDistance = max(_RefractionMaxDistance, 0.1);
             int steps = clamp((int)_RefractionSteps, 2, 24);
-            float expFactor = clamp(pow(maxDistance / HPO_REFRACTION_REFERENCE_DISTANCE, 2.0), 1.01, 32.0);
+            float expFactor = clamp(pow(maxDistance / PLO_REFRACTION_REFERENCE_DISTANCE, 2.0), 1.01, 32.0);
             float rcpCount = rcp((float)steps);
             float kDenom = rcp(expFactor - 1.0);
             float expStep = pow(expFactor, rcpCount);
@@ -626,7 +657,7 @@ Shader "HPOcean/Water"
     // 水下光程与体积散射
     // ------------------------------------------------------------------
 
-    struct WaterPath
+    struct SeaPath
     {
         float3 rayDir;
         float bedDepth;
@@ -635,10 +666,10 @@ Shader "HPOcean/Water"
         float viewDepthRate; // 沿视线每走 1m 下潜多少
     };
 
-    WaterPath ComputeWaterPath(float3 positionRWS, float3 N, float3 V, RefractionResult refr)
+    SeaPath ComputeSeaPath(float3 positionRWS, float3 N, float3 V, RefractionResult refr)
     {
-        WaterPath p;
-        p.rayDir = refract(-V, N, HPO_ETA);
+        SeaPath p;
+        p.rayDir = refract(-V, N, PLO_ETA);
         float depthRate = max(-p.rayDir.y, 0.02);
         p.bedDepth = refr.bedValid ? max(positionRWS.y - refr.bedRWS.y, 0.0) : 1e5;
         p.pathLength = refr.bedValid ? min(p.bedDepth / depthRate, distance(refr.bedRWS, positionRWS) * 1.33) : 1e5;
@@ -649,29 +680,29 @@ Shader "HPOcean/Water"
 
     float SunRefractedCos(float3 L, out float3 sunRefract)
     {
-        sunRefract = refract(-L, float3(0, 1, 0), HPO_ETA);
+        sunRefract = refract(-L, float3(0, 1, 0), PLO_ETA);
         return max(-sunRefract.y, 0.1);
     }
 
     // 宏观体积散射：分段解析积分 + 每段采样一次太阳阴影（指数步进 + 抖动）
     // 段 [t0, t1] 上：∫ σs · p · E · exp(-σt (t + z(t)/μ)) dt，z(t) = t · viewDepthRate
-    float3 ComputeSunVolume(WaterPath path, float3 positionRWS, DirectionalLightData light, float3 sunColor, float dither)
+    float3 ComputeSunVolume(SeaPath path, float3 positionRWS, DirectionalLightData light, float3 sunColor, float dither)
     {
         float3 sigmaS, sigmaT;
         GetMedium(sigmaS, sigmaT);
 
         float3 sunRefract;
         float muSun = SunRefractedCos(-light.forward, sunRefract);
-        float phase = WaterPhase(dot(path.rayDir, -sunRefract));
+        float phase = SeaPhase(dot(path.rayDir, -sunRefract));
         float3 k = sigmaT * (1.0 + path.viewDepthRate / muSun);
 
         float3 S = 0;
-        float expStep = pow(HPO_EXP_FACTOR, 1.0 / HPO_SAMPLE_COUNT);
-        float kDenom = 1.0 / (HPO_EXP_FACTOR - 1.0);
+        float expStep = pow(PLO_EXP_FACTOR, 1.0 / PLO_SAMPLE_COUNT);
+        float kDenom = 1.0 / (PLO_EXP_FACTOR - 1.0);
         float currentExp = 1.0;
 
         [unroll]
-        for (int i = 0; i < HPO_SAMPLE_COUNT; i++)
+        for (int i = 0; i < PLO_SAMPLE_COUNT; i++)
         {
             float nextExp = currentExp * expStep;
             float t0 = (currentExp - 1.0) * kDenom * path.marchLength;
@@ -689,13 +720,13 @@ Shader "HPOcean/Water"
     bool SampleVolumeBuffer(float2 screenUV, float linearDepth, out float3 result)
     {
         result = 0;
-        if (_HPOceanCameraId <= 0 || _HPOceanVolumeOwner != _HPOceanCameraId)
+        if (_PLOceanCameraId <= 0 || _PLOceanVolumeOwner != _PLOceanCameraId)
             return false;
 
-        float2 p = screenUV * _HPOceanVolumeSize.xy - 0.5;
+        float2 p = screenUV * _PLOceanVolumeSize.xy - 0.5;
         int2 base = int2(floor(p));
         float2 f = p - base;
-        int2 maxCoord = int2(_HPOceanVolumeSize.xy) - 1;
+        int2 maxCoord = int2(_PLOceanVolumeSize.xy) - 1;
 
         float3 acc = 0;
         float weightSum = 0;
@@ -703,7 +734,7 @@ Shader "HPOcean/Water"
         for (int i = 0; i < 4; i++)
         {
             int2 o = int2(i & 1, i >> 1);
-            float4 t = LOAD_TEXTURE2D_X(_HPOceanVolumeTex, clamp(base + o, 0, maxCoord));
+            float4 t = LOAD_TEXTURE2D_X(_PLOceanVolumeTex, clamp(base + o, 0, maxCoord));
             float wb = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
             float wd = t.a > 0 ? exp(-abs(t.a - linearDepth) / (0.03 * linearDepth + 0.05)) : 0.0;
             acc += t.rgb * wb * wd;
@@ -720,7 +751,7 @@ Shader "HPOcean/Water"
     // 反射：SSR → 反射探针 → 天空
     // ------------------------------------------------------------------
 
-    LightLoopContext InitWaterLightLoopContext(float3 positionRWS)
+    LightLoopContext InitSeaLightLoopContext(float3 positionRWS)
     {
         // 含 StructuredBuffer 成员，不能用 ZERO_INITIALIZE
         LightLoopContext context;
@@ -764,7 +795,7 @@ Shader "HPOcean/Water"
 
     // 点光源 / 聚光灯：表面高光 + 折射进水里的单次散射
     float3 EvaluatePunctualLights(LightLoopContext context, PositionInputs posInput, float3 N, float3 V,
-                                  float roughness, float NdotV, WaterPath path, out float3 scatter)
+                                  float roughness, float NdotV, SeaPath path, out float3 scatter)
     {
         float3 specular = 0;
         scatter = 0;
@@ -797,16 +828,16 @@ Shader "HPOcean/Water"
             float NdotL = dot(N, L);
             float3 H = SafeNormalize(L + V);
             float DV = DV_SmithJointGGX(saturate(dot(N, H)), abs(NdotL), NdotV, roughness);
-            specular += color.rgb * F_Schlick(HPO_F0, saturate(dot(L, H))) * DV * saturate(NdotL) * light.specularDimmer;
+            specular += color.rgb * F_Schlick(PLO_F0, saturate(dot(L, H))) * DV * saturate(NdotL) * light.specularDimmer;
 
             // 光源在水面以上才折射进水体
             if (L.y > 0.0)
             {
-                float3 lightRefract = refract(-L, float3(0, 1, 0), HPO_ETA);
+                float3 lightRefract = refract(-L, float3(0, 1, 0), PLO_ETA);
                 float mu = max(-lightRefract.y, 0.1);
                 float3 k = sigmaT * (1.0 + path.viewDepthRate / mu);
-                float entry = saturate(NdotL) * (1.0 - F_Schlick(HPO_F0, saturate(NdotL)));
-                scatter += color.rgb * light.diffuseDimmer * entry * sigmaS * WaterPhase(dot(path.rayDir, -lightRefract))
+                float entry = saturate(NdotL) * (1.0 - F_Schlick(PLO_F0, saturate(NdotL)));
+                scatter += color.rgb * light.diffuseDimmer * entry * sigmaS * SeaPhase(dot(path.rayDir, -lightRefract))
                          * SegmentIntegral(k, 0.0, path.marchLength);
             }
         }
@@ -818,7 +849,7 @@ Shader "HPOcean/Water"
     // 水下看水面（背面）：斯涅尔窗内透出天空，窗外全反射水体自身的颜色
     // ------------------------------------------------------------------
 
-    float3 UnderwaterInscatterColor(float3 sunColor, float3 L)
+    float3 UnderseaInscatterColor(float3 sunColor, float3 L)
     {
         float3 sigmaS, sigmaT;
         GetMedium(sigmaS, sigmaT);
@@ -832,12 +863,12 @@ Shader "HPOcean/Water"
     {
         float3 n = -N;  // 朝向水下相机
         float3 transmitted = refract(-V, n, 1.33);
-        float3 underColor = UnderwaterInscatterColor(sunColor, L);
+        float3 underColor = UnderseaInscatterColor(sunColor, L);
 
         if (dot(transmitted, transmitted) < 1e-4)
             return underColor;  // 全反射
 
-        float F = F_Schlick(HPO_F0, saturate(dot(transmitted, N)));
+        float F = F_Schlick(PLO_F0, saturate(dot(transmitted, N)));
         float3 sky = SampleSkyTexture(transmitted, 0, 0).rgb;
         return sky * (1.0 - F) + underColor * F;
     }
@@ -868,16 +899,16 @@ Shader "HPOcean/Water"
 
         // 网格单元边长约为 dist / 16，按它选 mip，避免远处顶点采样走样
         float lodBase = log2(max(dist * 0.0625, 1e-4) * 256.0);
-        float3 L = _HPOceanLengthScales.xyz;
+        float3 L = _PLOceanLengthScales.xyz;
 
-        float3 disp = SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement0, s_trilinear_repeat_sampler, xz / L.x, max(lodBase - log2(L.x), 0.0)).xyz;
-        disp += SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement1, s_trilinear_repeat_sampler, xz / L.y, max(lodBase - log2(L.y), 0.0)).xyz
+        float3 disp = SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement0, s_trilinear_repeat_sampler, xz / L.x, max(lodBase - log2(L.x), 0.0)).xyz;
+        disp += SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement1, s_trilinear_repeat_sampler, xz / L.y, max(lodBase - log2(L.y), 0.0)).xyz
               * saturate(1.0 - dist / _Cascade1Fade);
-        disp += SAMPLE_TEXTURE2D_LOD(_HPOceanDisplacement2, s_trilinear_repeat_sampler, xz / L.z, max(lodBase - log2(L.z), 0.0)).xyz
+        disp += SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement2, s_trilinear_repeat_sampler, xz / L.z, max(lodBase - log2(L.z), 0.0)).xyz
               * saturate(1.0 - dist / _Cascade2Fade);
 
         // 波纹在世界空间里静止，要按 FFT 水平位移之后的位置采样
-        disp.y += SampleRippleHeight(xz + disp.xz, max(dist * 0.0625, _HPOceanRippleParams.w));
+        disp.y += SampleRippleHeight(xz + disp.xz, max(dist * 0.0625, _PLOceanRippleParams.w));
         positionRWS += disp;
 
         output.positionCS = TransformWorldToHClip(positionRWS);
@@ -892,6 +923,8 @@ Shader "HPOcean/Water"
 
     void FragDepth(Varyings input, FRONT_FACE_TYPE isFrontFace : FRONT_FACE_SEMANTIC, out float4 outNormalBuffer : SV_Target0)
     {
+        if (InsideBoatHull(GetAbsolutePositionWS(input.positionRWS)))
+            discard;
         float3 V = GetWorldSpaceNormalizeViewDir(input.positionRWS);
         float dist = length(input.positionRWS);
         OceanSurface surf = SampleOceanSurface(input.oceanData.xy, GetAbsolutePositionWS(input.positionRWS).xz, dist);
@@ -910,6 +943,8 @@ Shader "HPOcean/Water"
     float4 Frag(Varyings input, FRONT_FACE_TYPE isFrontFace : FRONT_FACE_SEMANTIC) : SV_Target
     {
         float3 positionRWS = input.positionRWS;
+        if (InsideBoatHull(GetAbsolutePositionWS(positionRWS)))
+            discard;
         uint2 tileIndex = uint2(input.positionCS.xy) / GetTileSize();
         PositionInputs posInput = GetPositionInput(input.positionCS.xy, _ScreenSize.zw, input.positionCS.z, input.positionCS.w, positionRWS, tileIndex);
         float3 V = GetWorldSpaceNormalizeViewDir(positionRWS);
@@ -941,7 +976,7 @@ Shader "HPOcean/Water"
 
         // ---------------- 折射与水下光程 ----------------
         RefractionResult refr = ComputeRefraction(positionRWS, N, V, posInput.positionNDC, dither);
-        WaterPath path = ComputeWaterPath(positionRWS, N, V, refr);
+        SeaPath path = ComputeSeaPath(positionRWS, N, V, refr);
 
         float3 sunRefract;
         float muSun = SunRefractedCos(L, sunRefract);
@@ -952,7 +987,7 @@ Shader "HPOcean/Water"
         if (!SampleVolumeBuffer(posInput.positionNDC, posInput.linearDepth, S_volume))
             S_volume = ComputeSunVolume(path, positionRWS, light, sunColor, dither);
 
-        float3 T_entry = 1.0 - F_Schlick(HPO_F0, clampedNdotL);
+        float3 T_entry = 1.0 - F_Schlick(PLO_F0, clampedNdotL);
         float3 macroScattering = S_volume * clampedNdotL * T_entry;
 
         // 天光的体积散射（各向同性，从上半球入射）
@@ -965,34 +1000,34 @@ Shader "HPOcean/Water"
         float thickness = max(1.0 - crest, 0.001);
 
         float sigmaTScalar = Luminance(sigmaT);
-        float L_linear = thickness * HPO_SSS_PATH_SCALE;
-        float L_nonlinear = thickness * thickness * HPO_SSS_PATH_SCALE * (1.0 + scatterDensity);
-        float nonlinearWeight = saturate(sigmaTScalar * thickness * HPO_SSS_PATH_SCALE * HPO_SSS_NONLINEAR_STRENGTH);
+        float L_linear = thickness * PLO_SSS_PATH_SCALE;
+        float L_nonlinear = thickness * thickness * PLO_SSS_PATH_SCALE * (1.0 + scatterDensity);
+        float nonlinearWeight = saturate(sigmaTScalar * thickness * PLO_SSS_PATH_SCALE * PLO_SSS_NONLINEAR_STRENGTH);
         float sssPath = lerp(L_linear, L_nonlinear, nonlinearWeight);
 
         float3 sssTransmittance = exp(-sigmaT * sssPath);
-        float3 S_sss = sunColor * (1.0 - sssTransmittance) * (sigmaS / sigmaT) * WaterPhase(dot(-V, L)) * _ScatterIntensity;
+        float3 S_sss = sunColor * (1.0 - sssTransmittance) * (sigmaS / sigmaT) * SeaPhase(dot(-V, L)) * _ScatterIntensity;
 
         float G_sss = 1.0 - clampedNdotL;
-        float3 thinLayerSSS = S_sss * G_sss * sunShadow * HPO_SSS_SCATTER_BOOST;
+        float3 thinLayerSSS = S_sss * G_sss * sunShadow * PLO_SSS_SCATTER_BOOST;
         float sssWeight = saturate(1.0 - Luminance(sssTransmittance));
         thinLayerSSS = lerp(S_volume * G_sss, thinLayerSSS, sssWeight) * _SSSIntensity;
 
         // ---------------- Part 3：背光透射 ----------------
         float G_backlit = saturate(-NdotL);
-        float3 T_backlit = exp(-sigmaT * thickness * HPO_BACKLIT_PATH_SCALE);
+        float3 T_backlit = exp(-sigmaT * thickness * PLO_BACKLIT_PATH_SCALE);
         float3 backlit = sunColor * G_backlit * T_backlit * HenyeyGreenstein(dot(V, -L), _BacklitG) * sunShadow * _BacklitIntensity;
 
         // ---------------- 点光源 / 聚光灯 ----------------
         float perceptualRoughness = SurfacePerceptualRoughness(dist);
         float roughness = max(PerceptualRoughnessToRoughness(perceptualRoughness), 0.002);
-        LightLoopContext context = InitWaterLightLoopContext(positionRWS);
+        LightLoopContext context = InitSeaLightLoopContext(positionRWS);
         float3 punctualScatter;
         float3 punctualSpecular = EvaluatePunctualLights(context, posInput, N, V, roughness, NdotV, path, punctualScatter);
 
         // 色带：体积散射按水深取色，浪尖薄层取浅水端
         float rampU = refr.bedValid ? path.bedDepth / max(_ScatterRampDepth, 1e-3) : 1.0;
-        float3 waterBody = ApplyScatterRamp(macroScattering + ambientScattering + punctualScatter, rampU)
+        float3 seaBody = ApplyScatterRamp(macroScattering + ambientScattering + punctualScatter, rampU)
                          + ApplyScatterRamp(thinLayerSSS + backlit, 0.3 * thickness);
 
         // ---------------- 水下场景（模糊 + 色散 + 焦散）----------------
@@ -1000,7 +1035,7 @@ Shader "HPOcean/Water"
         float3 sceneColor = 0;
         if (refr.bedValid)
         {
-            float mip = WaterBlurMip(path.marchLength, scatterDensity);
+            float mip = SeaBlurMip(path.marchLength, scatterDensity);
             float2 dispersionUV = clamp(refr.uvOffset * _Dispersion, -0.01, 0.01) * dither;
             float3 cLong  = SampleCameraColor(refr.sampleUV - dispersionUV, mip);
             float3 cMid   = SampleCameraColor(refr.sampleUV, mip);
@@ -1020,7 +1055,7 @@ Shader "HPOcean/Water"
         float NdotH = saturate(dot(N, H));
         float LdotH = saturate(dot(L, H));
         float DV = DV_SmithJointGGX(NdotH, abs(NdotL), NdotV, roughness);
-        float3 sunSpecular = sunColor * sunShadow * F_Schlick(HPO_F0, LdotH) * DV * clampedNdotL
+        float3 sunSpecular = sunColor * sunShadow * F_Schlick(PLO_F0, LdotH) * DV * clampedNdotL
                            * saturate(clampedNdotL * 5.0) * _SpecularIntensity * light.specularDimmer;
 
         float3 R = reflect(-V, N);
@@ -1049,18 +1084,18 @@ Shader "HPOcean/Water"
             envLighting += sky * (1.0 - hierarchyWeight);
         }
 
-        float fresnelEnv = HPO_F0 + (max(1.0 - perceptualRoughness, HPO_F0) - HPO_F0) * pow(1.0 - NdotV, 5.0);
+        float fresnelEnv = PLO_F0 + (max(1.0 - perceptualRoughness, PLO_F0) - PLO_F0) * pow(1.0 - NdotV, 5.0);
         float3 reflection = envLighting * fresnelEnv * _ReflectionIntensity;
 
         // ---------------- 合成 ----------------
-        float exitTransmission = 1.0 - F_Schlick(HPO_F0, NdotV);
+        float exitTransmission = 1.0 - F_Schlick(PLO_F0, NdotV);
 
         // 颜色金字塔已预曝光，其余光照需要乘曝光
-        float3 color = (waterBody * exitTransmission + sunSpecular + punctualSpecular + reflection) * exposure
+        float3 color = (seaBody * exitTransmission + sunSpecular + punctualSpecular + reflection) * exposure
                      + sceneColor * T_scene * exitTransmission;
 
         // ---------------- 泡沫 ----------------
-        float2 scroll = _HPOceanTime * _FoamScrollSpeed * float2(1.0, 0.73);
+        float2 scroll = _PLOceanTime * _FoamScrollSpeed * float2(1.0, 0.73);
 
         // 波峰泡沫：FFT Jacobian 累积的湍流
         float3 crestLayers = SampleFoamMap(xz * _FoamTiling, scroll);
@@ -1069,7 +1104,7 @@ Shader "HPOcean/Water"
         // 边缘泡沫：按垂直水深，水越浅泡沫越多，随时间往复的一圈圈泡沫带模拟浪拍到物体上又退回
         float edgeDepth = refr.sceneValid ? max(positionRWS.y - refr.sceneRWS.y, 0.0) : 1e5;
         float shore = saturate(1.0 - edgeDepth / max(_EdgeFoamDistance, 1e-3));
-        float surge = 0.75 + 0.25 * sin(edgeDepth / max(_EdgeFoamDistance, 1e-3) * 9.0 - _HPOceanTime * 1.7);
+        float surge = 0.75 + 0.25 * sin(edgeDepth / max(_EdgeFoamDistance, 1e-3) * 9.0 - _PLOceanTime * 1.7);
         float3 edgeLayers = SampleFoamMap(xz * _EdgeFoamTiling, scroll * float2(-0.6, 1.3));
         float edgeFoam = FoamFromLayers(edgeLayers, shore * shore * surge * _EdgeFoamIntensity);
 
@@ -1119,14 +1154,14 @@ Shader "HPOcean/Water"
     float4 FragVolume(FullScreenVaryings input) : SV_Target
     {
         uint2 lowSS = uint2(input.positionCS.xy);
-        float2 uv = (lowSS + 0.5) * _HPOceanVolumeSize.zw;
+        float2 uv = (lowSS + 0.5) * _PLOceanVolumeSize.zw;
         uint2 fullSS = min(uint2(uv * _ScreenSize.xy), uint2(_ScreenSize.xy) - 1);
 
-        uint stencil = GetStencilValue(LOAD_TEXTURE2D_X(_HPOceanStencil, fullSS));
-        if ((stencil & HPO_STENCIL_WATER) == 0)
+        uint stencil = GetStencilValue(LOAD_TEXTURE2D_X(_PLOceanStencil, fullSS));
+        if ((stencil & PLO_STENCIL_SEA) == 0)
             return 0;
 
-        float deviceDepth = LOAD_TEXTURE2D_X(_HPOceanDepthBuffer, fullSS).r;
+        float deviceDepth = LOAD_TEXTURE2D_X(_PLOceanDepthBuffer, fullSS).r;
         float3 positionRWS = ComputeWorldSpacePosition(uv, deviceDepth, UNITY_MATRIX_I_VP);
         float linearDepth = LinearEyeDepth(positionRWS, UNITY_MATRIX_V);
         float3 V = GetWorldSpaceNormalizeViewDir(positionRWS);
@@ -1141,23 +1176,23 @@ Shader "HPOcean/Water"
 
         float dither = InterleavedGradientNoise(lowSS, _TaaFrameInfo.z);
         RefractionResult refr = ComputeRefraction(positionRWS, N, V, uv, dither);
-        WaterPath path = ComputeWaterPath(positionRWS, N, V, refr);
+        SeaPath path = ComputeSeaPath(positionRWS, N, V, refr);
 
         // 预曝光存储，避免太阳照度超出 half 精度
         float3 current = ComputeSunVolume(path, positionRWS, light, sunColor, dither) * GetCurrentExposureMultiplier();
 
-        if (_HPOceanVolumeParams.x > 0)
+        if (_PLOceanVolumeParams.x > 0)
         {
             float2 prevUV = ComputeNormalizedDeviceCoordinates(positionRWS, UNITY_MATRIX_PREV_VP);
             if (all(prevUV > 0.0) && all(prevUV < 1.0))
             {
-                float4 history = SAMPLE_TEXTURE2D_X_LOD(_HPOceanVolumeHistory, s_linear_clamp_sampler, prevUV * _RTHandleScale.xy, 0);
+                float4 history = SAMPLE_TEXTURE2D_X_LOD(_PLOceanVolumeHistory, s_linear_clamp_sampler, prevUV * _RTHandleScale.xy, 0);
 
                 // 深度拒绝：历史像素与当前深度差太多（遮挡变化、边缘）就丢弃
                 float depthWeight = history.a > 0 ? saturate(1.0 - abs(history.a - linearDepth) / (0.05 * linearDepth + 0.1)) : 0.0;
                 // 亮度夹取：抑制阴影边界移动时的拖影
                 history.rgb = clamp(history.rgb, current * 0.25, current * 4.0 + 1e-4);
-                current = lerp(current, history.rgb, _HPOceanVolumeParams.y * depthWeight);
+                current = lerp(current, history.rgb, _PLOceanVolumeParams.y * depthWeight);
             }
         }
 
@@ -1168,11 +1203,11 @@ Shader "HPOcean/Water"
     // Pass：水下视角（雾、光柱、焦散）
     // ------------------------------------------------------------------
 
-    float4 FragUnderwater(FullScreenVaryings input) : SV_Target
+    float4 FragUndersea(FullScreenVaryings input) : SV_Target
     {
         uint2 positionSS = uint2(input.positionCS.xy);
         float2 uv = (positionSS + 0.5) * _ScreenSize.zw;
-        float3 color = LOAD_TEXTURE2D_X(_HPOceanSceneColorCopy, positionSS).rgb;
+        float3 color = LOAD_TEXTURE2D_X(_PLOceanSceneColorCopy, positionSS).rgb;
 
         // 吃水线：近裁剪面上每个像素对应一个世界点，和该点 XZ 处的真实波浪高度比较。
         // 近裁剪面只覆盖相机周围几十厘米，这里的水面就是镜头"泡"进去的那一截，
@@ -1184,25 +1219,25 @@ Shader "HPOcean/Water"
 
         // 用屏幕导数把高度差换成像素距离，做 1 像素宽的抗锯齿边
         float pixelDist = submerged / max(length(float2(ddx(submerged), ddy(submerged))), 1e-6);
-        float underwaterWeight = saturate(pixelDist + 0.5);
+        float underseaWeight = saturate(pixelDist + 0.5);
 
-        float deviceDepth = LOAD_TEXTURE2D_X(_HPOceanDepthBuffer, positionSS).r;
+        float deviceDepth = LOAD_TEXTURE2D_X(_PLOceanDepthBuffer, positionSS).r;
         bool isSky = deviceDepth == UNITY_RAW_FAR_CLIP_VALUE;
         float3 positionRWS = ComputeWorldSpacePosition(uv, deviceDepth, UNITY_MATRIX_I_VP);
-        uint stencil = GetStencilValue(LOAD_TEXTURE2D_X(_HPOceanStencil, positionSS));
+        uint stencil = GetStencilValue(LOAD_TEXTURE2D_X(_PLOceanStencil, positionSS));
 
         // 近平面在水上、但视线在近裁剪距离内就钻进水里：那一截水面网格被裁掉了，
         // 像素直接看到了水底。命中的不是水面、且命中点在水下，同样按水下处理。
         // 只在近裁剪面本身贴着水面时才成立；否则岸边水面网格没盖住、但解析浪高略高于沙面的沙子
         // 会被误判成水下，染上一块块水雾色（相机高于水面 maxWaveHeight 后整个 Pass 跳过，所以远看消失）
-        if (!isSky && (stencil & HPO_STENCIL_WATER) == 0 && submerged > -2.0 * _ProjectionParams.y)
+        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0 && submerged > -2.0 * _ProjectionParams.y)
         {
             float3 hitAbs = GetAbsolutePositionWS(positionRWS);
             if (hitAbs.y < OceanHeightAt(hitAbs.xz))
-                underwaterWeight = 1.0;
+                underseaWeight = 1.0;
         }
 
-        if (underwaterWeight <= 0.0)
+        if (underseaWeight <= 0.0)
             return float4(color, 1.0);
         float3 aboveColor = color;
         float3 viewDir = normalize(positionRWS - nearRWS);
@@ -1210,8 +1245,8 @@ Shader "HPOcean/Water"
 
         float3 sigmaS, sigmaT;
         GetMedium(sigmaS, sigmaT);
-        sigmaS *= _UnderwaterFogDensity;
-        sigmaT *= _UnderwaterFogDensity;
+        sigmaS *= _UnderseaFogDensity;
+        sigmaT *= _UnderseaFogDensity;
 
         DirectionalLightData light;
         float3 sunColor;
@@ -1222,8 +1257,8 @@ Shader "HPOcean/Water"
         float exposure = GetCurrentExposureMultiplier();
 
         // 直接看到的水底：焦散（只作用于不透明物体，不作用于水面背面）
-        float pixelDepth = _HPOceanWaterLevel - GetAbsolutePositionWS(positionRWS).y;
-        if (!isSky && (stencil & HPO_STENCIL_WATER) == 0 && pixelDepth > 0.05)
+        float pixelDepth = _PLOceanSeaLevel - GetAbsolutePositionWS(positionRWS).y;
+        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0 && pixelDepth > 0.05)
         {
             float bedShadow = SampleSunShadowCheap(light, positionRWS);
             color *= CausticModulation(positionRWS, pixelDepth, L, bedShadow, length(positionRWS));
@@ -1233,30 +1268,30 @@ Shader "HPOcean/Water"
         float d0 = max(submerged, 0.0);
         float rate = -viewDir.y;
         float3 k = sigmaT * (1.0 + rate / muSun);
-        float phase = WaterPhase(dot(viewDir, -sunRefract));
+        float phase = SeaPhase(dot(viewDir, -sunRefract));
         float dither = InterleavedGradientNoise(positionSS, _TaaFrameInfo.z);
 
         // 光柱：分段积分，每段采样一次阴影
         float3 sunScatter = 0;
-        float expStep = pow(HPO_EXP_FACTOR, 1.0 / HPO_SAMPLE_COUNT);
-        float kDenom = 1.0 / (HPO_EXP_FACTOR - 1.0);
+        float expStep = pow(PLO_EXP_FACTOR, 1.0 / PLO_SAMPLE_COUNT);
+        float kDenom = 1.0 / (PLO_EXP_FACTOR - 1.0);
         float currentExp = 1.0;
         float marchLength = min(dist, 120.0);
 
         [unroll]
-        for (int i = 0; i < HPO_SAMPLE_COUNT; i++)
+        for (int i = 0; i < PLO_SAMPLE_COUNT; i++)
         {
             float nextExp = currentExp * expStep;
             float t0 = (currentExp - 1.0) * kDenom * marchLength;
             float t1 = (nextExp - 1.0) * kDenom * marchLength;
             float ts = lerp(t0, t1, dither);
             float shadow = SampleSunShadowCheap(light, nearRWS + viewDir * ts);
-            sunScatter += lerp(1.0, shadow, saturate(_UnderwaterGodRays)) * SegmentIntegral(k, t0, t1);
+            sunScatter += lerp(1.0, shadow, saturate(_UnderseaGodRays)) * SegmentIntegral(k, t0, t1);
             currentExp = nextExp;
         }
         // 超过步进距离的部分不再采样阴影
         sunScatter += SegmentIntegral(k, marchLength, dist);
-        sunScatter *= sunColor * exp(-sigmaT * d0 / muSun) * sigmaS * phase * _ScatterIntensity * max(_UnderwaterGodRays, 0.5);
+        sunScatter *= sunColor * exp(-sigmaT * d0 / muSun) * sigmaS * phase * _ScatterIntensity * max(_UnderseaGodRays, 0.5);
 
         float3 ambientDown = SampleSH9(_AmbientProbeData, float3(0, 1, 0));
         float3 kAmb = sigmaT * (1.0 + rate / 0.7);
@@ -1267,7 +1302,7 @@ Shader "HPOcean/Water"
 
         // 水线处镜头上挂着的一层水膜：窄带压暗，像实拍时水线的弯月面
         float meniscus = exp(-abs(pixelDist) * 0.35) * 0.35;
-        color = lerp(aboveColor, color, underwaterWeight) * (1.0 - meniscus);
+        color = lerp(aboveColor, color, underseaWeight) * (1.0 - meniscus);
         return float4(color, 1.0);
     }
 
@@ -1318,7 +1353,7 @@ Shader "HPOcean/Water"
 
             HLSLPROGRAM
             #pragma multi_compile_fragment USE_FPTL_LIGHTLIST USE_CLUSTERED_LIGHTLIST
-            #pragma shader_feature_local_fragment _ _HPO_RAYMARCH_REFRACTION
+            #pragma shader_feature_local_fragment _ _PLO_RAYMARCH_REFRACTION
             #pragma vertex Vert
             #pragma fragment Frag
             ENDHLSL
@@ -1326,8 +1361,8 @@ Shader "HPOcean/Water"
 
         Pass
         {
-            Name "HPOceanVolume"
-            Tags { "LightMode" = "HPOceanVolume" }
+            Name "PLOceanVolume"
+            Tags { "LightMode" = "PLOceanVolume" }
 
             ZWrite Off
             ZTest Always
@@ -1335,7 +1370,7 @@ Shader "HPOcean/Water"
             Blend Off
 
             HLSLPROGRAM
-            #pragma shader_feature_local_fragment _ _HPO_RAYMARCH_REFRACTION
+            #pragma shader_feature_local_fragment _ _PLO_RAYMARCH_REFRACTION
             #pragma vertex VertFullScreen
             #pragma fragment FragVolume
             ENDHLSL
@@ -1343,8 +1378,8 @@ Shader "HPOcean/Water"
 
         Pass
         {
-            Name "HPOceanUnderwater"
-            Tags { "LightMode" = "HPOceanUnderwater" }
+            Name "PLOceanUndersea"
+            Tags { "LightMode" = "PLOceanUndersea" }
 
             ZWrite Off
             ZTest Always
@@ -1353,7 +1388,7 @@ Shader "HPOcean/Water"
 
             HLSLPROGRAM
             #pragma vertex VertFullScreen
-            #pragma fragment FragUnderwater
+            #pragma fragment FragUndersea
             ENDHLSL
         }
     }

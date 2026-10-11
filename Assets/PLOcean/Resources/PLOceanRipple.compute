@@ -1,4 +1,4 @@
-// HPOcean 交互水波（参考 HPWater 的 HPWaterWaveEquation）
+// PLOcean 交互水波（参考 HPWater 的 HPWaterWaveEquation）
 //   RippleShift   模拟区域跟随相机移动时，把波高整体平移若干像素，世界空间里的波纹保持不动
 //   RippleUpdate  二维波动方程（中心差分），障碍物处诺伊曼反射边界，四周海绵层吸收，叠加高斯波源
 //
@@ -23,7 +23,7 @@ float  _Displace;          // 物体占据/离开一个格子时推高/拉低的
 int    _Resolution;
 float  _Courant2;          // (c·Δt/Δx)²，CFL 要求 c·Δt/Δx < 0.707
 float  _Retention;         // 每步保留的速度（1 - 阻尼）
-float  _WaterLevel;
+float  _SeaLevel;
 float  _ObstacleOffset;    // 场景高于水面多少米算障碍
 float  _ShallowDepth;      // 浅于此深度的区域额外衰减
 float  _MaxHeight;
@@ -44,12 +44,12 @@ void RippleShift(uint3 id : SV_DispatchThreadID)
 
 bool IsObstacle(int2 c)
 {
-    return _SceneHeight[c] > _WaterLevel + _ObstacleOffset;
+    return _SceneHeight[c] > _SeaLevel + _ObstacleOffset;
 }
 
 bool WasObstacle(int2 c)
 {
-    return _PrevSceneHeight[c] > _WaterLevel + _ObstacleOffset;
+    return _PrevSceneHeight[c] > _SeaLevel + _ObstacleOffset;
 }
 
 [numthreads(8, 8, 1)]
@@ -84,7 +84,7 @@ void RippleUpdate(uint3 id : SV_DispatchThreadID)
     float absorption = saturate(1.0 - edge * edge);
 
     // 浅滩：越浅衰减越快，波纹不会在沙滩上来回弹
-    float bedDepth = _WaterLevel - _SceneHeight[c];
+    float bedDepth = _SeaLevel - _SceneHeight[c];
     float shallow = _ShallowDepth > 0 ? lerp(0.9, 1.0, saturate(bedDepth / _ShallowDepth)) : 1.0;
 
     float retention = _Retention * absorption * shallow;

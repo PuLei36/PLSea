@@ -8,7 +8,7 @@ using UnityEngine;
 /// 挂在带 Humanoid Animator 的角色上；非 Humanoid 退化为在自身位置产生波源。
 /// </summary>
 [DisallowMultipleComponent]
-public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
+public class PLOceanWader : MonoBehaviour, PLOceanRipple.IEmitter
 {
     [Header("波源半径（米）")]
     [Min(0.01f)] public float legRadius = 0.25f;
@@ -22,6 +22,9 @@ public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
     [Min(0.1f)] public float maxSpeed = 2f;
     [Tooltip("速度平滑时间（秒），过滤动画骨骼的抖动")]
     [Min(0f)] public float velocitySmoothing = 0.08f;
+    [Tooltip("身体整体前进带起的尾迹，按角色移动速度（米/秒推水 每 1 m/s），跑步时脚常离开水面，主要靠它体现速度")]
+    [Min(0f)] public float wakeStrength = 0.35f;
+    [Min(0.01f)] public float wakeRadius = 0.45f;
     [Tooltip("站着不动时身体边轻微的水波（米/秒），0 关闭")]
     [Min(0f)] public float idleStrength = 0.08f;
     [Tooltip("手脚进出水面时溅起的波高（米/每 1 m/s 竖直速度）")]
@@ -55,17 +58,17 @@ public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
         // 角色自身不参与“轮廓挤水”，也不当反射墙，避免身体下面挖出一块暗坑
         _renderers = GetComponentsInChildren<Renderer>();
         foreach (var r in _renderers)
-            HPOceanRipple.ExcludeRenderer(r);
-        HPOceanRipple.RegisterEmitter(this);
+            PLOceanRipple.ExcludeRenderer(r);
+        PLOceanRipple.RegisterEmitter(this);
         _hasLast = false;
     }
 
     void OnDisable()
     {
-        HPOceanRipple.UnregisterEmitter(this);
+        PLOceanRipple.UnregisterEmitter(this);
         if (_renderers != null)
             foreach (var r in _renderers)
-                HPOceanRipple.IncludeRenderer(r);
+                PLOceanRipple.IncludeRenderer(r);
         _sources.Clear();
     }
 
@@ -101,32 +104,45 @@ public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
     void LateUpdate()
     {
         _sources.Clear();
-        var ripple = HPOceanRipple.Active;
+        var ripple = PLOceanRipple.Active;
         if (ripple == null)
             return;
-        float waterLevel = ripple.transform.position.y;
+        float seaLevel = ripple.transform.position.y;
         float dt = Mathf.Max(Time.deltaTime, 1e-4f);
         float blend = velocitySmoothing > 0f ? 1f - Mathf.Exp(-dt / velocitySmoothing) : 1f;
         float idle = idleStrength * Mathf.Sin(Time.time * 2f * Mathf.PI * 0.7f);
 
+        var root = transform.position;
+        var rootV = _hasLast ? Flat(root - _lastPosition) / dt : Vector2.zero;
+        _rootVelocity = Vector2.Lerp(_rootVelocity, rootV, blend);
+        _lastPosition = root;
+        _hasLast = true;
+
         if (_chains.Count == 0)
         {
-            var p = transform.position;
-            var v = _hasLast ? Flat(p - _lastPosition) / dt : Vector2.zero;
-            _rootVelocity = Vector2.Lerp(_rootVelocity, v, blend);
-            _lastPosition = p;
-            _hasLast = true;
-            AddDipole(p, _rootVelocity, bodyRadius, idle);
+            AddDipole(root, _rootVelocity, bodyRadius, idle);
             return;
+        }
+
+        // 尾迹：根节点在水下（人在水里）时，身体前方推高、后方下陷，强度随整体速度增长
+        float rootSpeed = _rootVelocity.magnitude;
+        if (root.y < seaLevel && rootSpeed > 0.05f && wakeStrength > 0f)
+        {
+            var dir = _rootVelocity / rootSpeed * (wakeRadius * 0.6f);
+            float push = rootSpeed * wakeStrength;
+            _sources.Add(new Vector4(root.x + dir.x, root.z + dir.y, wakeRadius, push));
+            _sources.Add(new Vector4(root.x - dir.x, root.z - dir.y, wakeRadius, -push));
         }
 
         foreach (var c in _chains)
         {
-            bool found = FindCrossing(c.bones, waterLevel, out var point);
+            bool found = FindCrossing(c.bones, seaLevel, out var point);
             if (found)
             {
-                var v = c.hadPoint ? Flat(point - c.lastPoint) / dt : Vector2.zero;
-                c.velocity = c.hadPoint ? Vector2.Lerp(c.velocity, v, blend) : Vector2.zero;
+                // 跑步时脚频繁整只抬出水面，重新入水时不能从 0 开始平滑，否则跑得越快波越弱。
+                // 重新入水时用角色整体的速度起步
+                var v = c.hadPoint ? Flat(point - c.lastPoint) / dt : _rootVelocity;
+                c.velocity = c.hadPoint ? Vector2.Lerp(c.velocity, v, blend) : _rootVelocity;
                 AddDipole(point, c.velocity, c.radius, idle);
                 c.lastPoint = point;
             }
@@ -137,10 +153,10 @@ public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
             // 手脚穿过水面时溅一下，入水下压、出水上提
             var end = c.bones[c.bones.Length - 1];
             float endY = end.position.y;
-            if (c.hasEndY && (c.lastEndY - waterLevel) * (endY - waterLevel) < 0f)
+            if (c.hasEndY && (c.lastEndY - seaLevel) * (endY - seaLevel) < 0f)
             {
                 float vy = (endY - c.lastEndY) / dt;
-                HPOceanRipple.AddImpulse(end.position, splashRadius, Mathf.Clamp(vy, -3f, 3f) * splashStrength);
+                PLOceanRipple.AddImpulse(end.position, splashRadius, Mathf.Clamp(vy, -3f, 3f) * splashStrength);
             }
             c.lastEndY = endY;
             c.hasEndY = true;
@@ -153,14 +169,14 @@ public class HPOceanWader : MonoBehaviour, HPOceanRipple.IEmitter
     {
         for (int i = 0; i + 1 < bones.Length; i++)
         {
-            if (WaterlineCrossing(bones[i].position, bones[i + 1].position, level, out point))
+            if (SealineCrossing(bones[i].position, bones[i + 1].position, level, out point))
                 return true;
         }
         point = default;
         return false;
     }
 
-    static bool WaterlineCrossing(Vector3 a, Vector3 b, float level, out Vector3 point)
+    static bool SealineCrossing(Vector3 a, Vector3 b, float level, out Vector3 point)
     {
         point = default;
         if ((a.y - level) * (b.y - level) > 0f || Mathf.Approximately(a.y, b.y))

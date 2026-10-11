@@ -1,4 +1,4 @@
-// HPOcean FFT 海浪模拟
+// PLOcean FFT 海浪模拟
 // 每个级联（cascade）独立调度一遍：
 //   InitSpectrum   : 参数变化时生成初始频谱 h0(k)（JONSWAP + Donelan-Banner 方向分布）
 //   UpdateSpectrum : 每帧按色散关系推进相位，并打包 8 个实数场到 2 张复数纹理

@@ -5,7 +5,7 @@ using UnityEngine;
 /// 物体穿过水面时按水平移动速度和竖直速度推波，静止不动时不产生波纹。
 /// </summary>
 [ExecuteAlways]
-public class HPOceanRippleSource : MonoBehaviour
+public class PLOceanRippleSource : MonoBehaviour
 {
     [Tooltip("波源半径（米）")]
     [Min(0.01f)] public float radius = 0.5f;
@@ -26,13 +26,13 @@ public class HPOceanRippleSource : MonoBehaviour
     void OnEnable()
     {
         _hasLast = false;
-        HPOceanRipple.Register(this);
+        PLOceanRipple.Register(this);
     }
 
-    void OnDisable() => HPOceanRipple.Unregister(this);
+    void OnDisable() => PLOceanRipple.Unregister(this);
 
     /// <summary>xy = 世界 XZ，z = 半径，w = 每秒推高的米数。</summary>
-    public bool TryGetSource(float waterLevel, float stepTime, out Vector4 source)
+    public bool TryGetSource(float seaLevel, float stepTime, out Vector4 source)
     {
         source = default;
         var p = transform.position;
@@ -47,7 +47,7 @@ public class HPOceanRippleSource : MonoBehaviour
         }
         var velocity = _velocity;
 
-        if (Mathf.Abs(p.y - waterLevel) > contactRange)
+        if (Mathf.Abs(p.y - seaLevel) > contactRange)
             return false;
 
         float speed = new Vector2(velocity.x, velocity.z).magnitude + Mathf.Abs(velocity.y) * 2f;

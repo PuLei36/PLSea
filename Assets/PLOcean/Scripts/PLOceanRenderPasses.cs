@@ -7,7 +7,7 @@ using UnityEngine.Rendering.HighDefinition;
 /// <summary>
 /// 给每个相机分配一个从 1 开始的小整数编号，写进 shader 判断体积缓冲是不是属于当前相机。
 /// </summary>
-public static class HPOceanCameraIds
+public static class PLOceanCameraIds
 {
     static readonly Dictionary<Camera, int> s_Ids = new Dictionary<Camera, int>();
 
@@ -22,17 +22,17 @@ public static class HPOceanCameraIds
     }
 }
 
-static class HPOceanPassShaderIDs
+static class PLOceanPassShaderIDs
 {
-    public static readonly int DepthBuffer = Shader.PropertyToID("_HPOceanDepthBuffer");
-    public static readonly int Stencil = Shader.PropertyToID("_HPOceanStencil");
-    public static readonly int SceneColorCopy = Shader.PropertyToID("_HPOceanSceneColorCopy");
-    public static readonly int VolumeTex = Shader.PropertyToID("_HPOceanVolumeTex");
-    public static readonly int VolumeHistory = Shader.PropertyToID("_HPOceanVolumeHistory");
-    public static readonly int VolumeSize = Shader.PropertyToID("_HPOceanVolumeSize");
-    public static readonly int VolumeParams = Shader.PropertyToID("_HPOceanVolumeParams");
-    public static readonly int VolumeOwner = Shader.PropertyToID("_HPOceanVolumeOwner");
-    public static readonly int WaterLevel = Shader.PropertyToID("_HPOceanWaterLevel");
+    public static readonly int DepthBuffer = Shader.PropertyToID("_PLOceanDepthBuffer");
+    public static readonly int Stencil = Shader.PropertyToID("_PLOceanStencil");
+    public static readonly int SceneColorCopy = Shader.PropertyToID("_PLOceanSceneColorCopy");
+    public static readonly int VolumeTex = Shader.PropertyToID("_PLOceanVolumeTex");
+    public static readonly int VolumeHistory = Shader.PropertyToID("_PLOceanVolumeHistory");
+    public static readonly int VolumeSize = Shader.PropertyToID("_PLOceanVolumeSize");
+    public static readonly int VolumeParams = Shader.PropertyToID("_PLOceanVolumeParams");
+    public static readonly int VolumeOwner = Shader.PropertyToID("_PLOceanVolumeOwner");
+    public static readonly int SeaLevel = Shader.PropertyToID("_PLOceanSeaLevel");
 
     public static bool ShouldRender(Camera camera)
         => camera.cameraType == CameraType.Game || camera.cameraType == CameraType.SceneView;
@@ -49,9 +49,9 @@ static class HPOceanPassShaderIDs
 /// 在半分辨率下沿折射光线步进算散射，再用上一帧结果重投影混合；水面 Forward Pass 做深度感知上采样。
 /// </summary>
 [System.Serializable]
-public class HPOceanVolumePass : CustomPass
+public class PLOceanVolumePass : CustomPass
 {
-    public Material waterMaterial;
+    public Material seaMaterial;
     [Range(0f, 0.97f)] public float temporalWeight = 0.85f;
 
     class History
@@ -70,9 +70,9 @@ public class HPOceanVolumePass : CustomPass
     protected override void Execute(CustomPassContext ctx)
     {
         var camera = ctx.hdCamera.camera;
-        if (waterMaterial == null || !HPOceanPassShaderIDs.ShouldRender(camera))
+        if (seaMaterial == null || !PLOceanPassShaderIDs.ShouldRender(camera))
             return;
-        int pass = waterMaterial.FindPass("HPOceanVolume");
+        int pass = seaMaterial.FindPass("PLOceanVolume");
         if (pass < 0)
             return;
 
@@ -80,8 +80,8 @@ public class HPOceanVolumePass : CustomPass
         {
             history = new History
             {
-                a = HPOceanPassShaderIDs.AllocScreenRT(Vector2.one * 0.5f, "HPOceanVolumeA"),
-                b = HPOceanPassShaderIDs.AllocScreenRT(Vector2.one * 0.5f, "HPOceanVolumeB"),
+                a = PLOceanPassShaderIDs.AllocScreenRT(Vector2.one * 0.5f, "PLOceanVolumeA"),
+                b = PLOceanPassShaderIDs.AllocScreenRT(Vector2.one * 0.5f, "PLOceanVolumeB"),
             };
             _histories.Add(camera, history);
         }
@@ -96,20 +96,20 @@ public class HPOceanVolumePass : CustomPass
         history.flip = !history.flip;
 
         var cmd = ctx.cmd;
-        cmd.SetGlobalTexture(HPOceanPassShaderIDs.DepthBuffer, ctx.cameraDepthBuffer);
-        cmd.SetGlobalTexture(HPOceanPassShaderIDs.Stencil, ctx.cameraDepthBuffer, RenderTextureSubElement.Stencil);
+        cmd.SetGlobalTexture(PLOceanPassShaderIDs.DepthBuffer, ctx.cameraDepthBuffer);
+        cmd.SetGlobalTexture(PLOceanPassShaderIDs.Stencil, ctx.cameraDepthBuffer, RenderTextureSubElement.Stencil);
 
         var sizeVector = new Vector4(size.x, size.y, 1f / size.x, 1f / size.y);
-        ctx.propertyBlock.SetTexture(HPOceanPassShaderIDs.VolumeHistory, previous);
-        ctx.propertyBlock.SetVector(HPOceanPassShaderIDs.VolumeSize, sizeVector);
-        ctx.propertyBlock.SetVector(HPOceanPassShaderIDs.VolumeParams, new Vector4(historyValid ? 1f : 0f, temporalWeight, 0f, 0f));
+        ctx.propertyBlock.SetTexture(PLOceanPassShaderIDs.VolumeHistory, previous);
+        ctx.propertyBlock.SetVector(PLOceanPassShaderIDs.VolumeSize, sizeVector);
+        ctx.propertyBlock.SetVector(PLOceanPassShaderIDs.VolumeParams, new Vector4(historyValid ? 1f : 0f, temporalWeight, 0f, 0f));
 
         CoreUtils.SetRenderTarget(cmd, current, ClearFlag.Color, Color.clear);
-        CoreUtils.DrawFullScreen(cmd, waterMaterial, ctx.propertyBlock, pass);
+        CoreUtils.DrawFullScreen(cmd, seaMaterial, ctx.propertyBlock, pass);
 
-        cmd.SetGlobalTexture(HPOceanPassShaderIDs.VolumeTex, current);
-        cmd.SetGlobalVector(HPOceanPassShaderIDs.VolumeSize, sizeVector);
-        cmd.SetGlobalFloat(HPOceanPassShaderIDs.VolumeOwner, HPOceanCameraIds.Get(camera));
+        cmd.SetGlobalTexture(PLOceanPassShaderIDs.VolumeTex, current);
+        cmd.SetGlobalVector(PLOceanPassShaderIDs.VolumeSize, sizeVector);
+        cmd.SetGlobalFloat(PLOceanPassShaderIDs.VolumeOwner, PLOceanCameraIds.Get(camera));
     }
 
     protected override void Cleanup()
@@ -128,9 +128,9 @@ public class HPOceanVolumePass : CustomPass
 /// 注入点 BeforePostProcess：水面背面已经画进颜色和深度缓冲。
 /// </summary>
 [System.Serializable]
-public class HPOceanUnderwaterPass : CustomPass
+public class PLOceanUnderseaPass : CustomPass
 {
-    public Material waterMaterial;
+    public Material seaMaterial;
     [Tooltip("相机高于水面这么多米时跳过（大于最大浪高即可）")]
     public float maxWaveHeight = 6f;
 
@@ -141,28 +141,28 @@ public class HPOceanUnderwaterPass : CustomPass
     protected override void Execute(CustomPassContext ctx)
     {
         var camera = ctx.hdCamera.camera;
-        if (waterMaterial == null || !HPOceanPassShaderIDs.ShouldRender(camera))
+        if (seaMaterial == null || !PLOceanPassShaderIDs.ShouldRender(camera))
             return;
-        float waterLevel = Shader.GetGlobalFloat(HPOceanPassShaderIDs.WaterLevel);
+        float seaLevel = Shader.GetGlobalFloat(PLOceanPassShaderIDs.SeaLevel);
         // 粗过滤：相机比最大浪高还高时跳过；精确的吃水线由 shader 在近裁剪面上逐像素判断
-        if (camera.transform.position.y > waterLevel + maxWaveHeight)
+        if (camera.transform.position.y > seaLevel + maxWaveHeight)
             return;
-        int pass = waterMaterial.FindPass("HPOceanUnderwater");
+        int pass = seaMaterial.FindPass("PLOceanUndersea");
         if (pass < 0)
             return;
 
         if (_colorCopy == null)
-            _colorCopy = HPOceanPassShaderIDs.AllocScreenRT(Vector2.one, "HPOceanSceneColorCopy");
+            _colorCopy = PLOceanPassShaderIDs.AllocScreenRT(Vector2.one, "PLOceanSceneColorCopy");
 
         CustomPassUtils.Copy(ctx, ctx.cameraColorBuffer, _colorCopy);
 
         var cmd = ctx.cmd;
-        cmd.SetGlobalTexture(HPOceanPassShaderIDs.DepthBuffer, ctx.cameraDepthBuffer);
-        cmd.SetGlobalTexture(HPOceanPassShaderIDs.Stencil, ctx.cameraDepthBuffer, RenderTextureSubElement.Stencil);
-        ctx.propertyBlock.SetTexture(HPOceanPassShaderIDs.SceneColorCopy, _colorCopy);
+        cmd.SetGlobalTexture(PLOceanPassShaderIDs.DepthBuffer, ctx.cameraDepthBuffer);
+        cmd.SetGlobalTexture(PLOceanPassShaderIDs.Stencil, ctx.cameraDepthBuffer, RenderTextureSubElement.Stencil);
+        ctx.propertyBlock.SetTexture(PLOceanPassShaderIDs.SceneColorCopy, _colorCopy);
 
         CoreUtils.SetRenderTarget(cmd, ctx.cameraColorBuffer, ClearFlag.None);
-        CoreUtils.DrawFullScreen(cmd, waterMaterial, ctx.propertyBlock, pass);
+        CoreUtils.DrawFullScreen(cmd, seaMaterial, ctx.propertyBlock, pass);
     }
 
     protected override void Cleanup()

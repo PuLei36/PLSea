@@ -10,10 +10,10 @@ using UnityEngine.Rendering;
 ///   2. 区域跟随相机按整像素平移，世界空间里的波纹保持不动
 ///   3. 固定 60Hz 子步推进波动方程，四周海绵层吸收
 /// 波源：穿过水面的物体移动时自动产生（对比前后两帧的场景高度），按住鼠标左键在水面拖动（运行时），
-/// HPOceanRippleSource 组件，或 AddImpulse。
+/// PLOceanRippleSource 组件，或 AddImpulse。
 /// </summary>
 [ExecuteAlways]
-public class HPOceanRipple : MonoBehaviour
+public class PLOceanRipple : MonoBehaviour
 {
     const int MaxSources = 32;
     const float StepTime = 1f / 60f;
@@ -58,14 +58,14 @@ public class HPOceanRipple : MonoBehaviour
     /// <summary>自定义波源，每帧往 output 里加 (世界 X, 世界 Z, 半径, 每秒推高米数)。</summary>
     public interface IEmitter { void GetSources(List<Vector4> output); }
 
-    static readonly List<HPOceanRippleSource> s_Sources = new List<HPOceanRippleSource>();
+    static readonly List<PLOceanRippleSource> s_Sources = new List<PLOceanRippleSource>();
     static readonly List<IEmitter> s_Emitters = new List<IEmitter>();
     static readonly List<Vector4> s_Impulses = new List<Vector4>();
     static readonly HashSet<Renderer> s_Excluded = new HashSet<Renderer>();
     static readonly List<Vector4> s_EmitterBuffer = new List<Vector4>();
 
     /// <summary>当前启用的模拟（取最后启用的那个）。</summary>
-    public static HPOceanRipple Active { get; private set; }
+    public static PLOceanRipple Active { get; private set; }
 
     public static void RegisterEmitter(IEmitter e) { if (!s_Emitters.Contains(e)) s_Emitters.Add(e); }
     public static void UnregisterEmitter(IEmitter e) => s_Emitters.Remove(e);
@@ -73,8 +73,8 @@ public class HPOceanRipple : MonoBehaviour
     public static void ExcludeRenderer(Renderer r) { if (r != null) s_Excluded.Add(r); }
     public static void IncludeRenderer(Renderer r) => s_Excluded.Remove(r);
 
-    public static void Register(HPOceanRippleSource source) { if (!s_Sources.Contains(source)) s_Sources.Add(source); }
-    public static void Unregister(HPOceanRippleSource source) => s_Sources.Remove(source);
+    public static void Register(PLOceanRippleSource source) { if (!s_Sources.Contains(source)) s_Sources.Add(source); }
+    public static void Unregister(PLOceanRippleSource source) => s_Sources.Remove(source);
 
     /// <summary>在世界坐标处产生一次波源，持续一个模拟步。height 为这一下推高的米数（负数下压）。</summary>
     public static void AddImpulse(Vector3 position, float radius, float height)
@@ -99,27 +99,27 @@ public class HPOceanRipple : MonoBehaviour
     int _lastFrame = -1;
     readonly Vector4[] _sourceArray = new Vector4[MaxSources];
 
-    static readonly int s_RippleTex = Shader.PropertyToID("_HPOceanRipple");
-    static readonly int s_RippleParams = Shader.PropertyToID("_HPOceanRippleParams");
-    static readonly int s_HeightVP = Shader.PropertyToID("_HPOceanRippleHeightVP");
+    static readonly int s_RippleTex = Shader.PropertyToID("_PLOceanRipple");
+    static readonly int s_RippleParams = Shader.PropertyToID("_PLOceanRippleParams");
+    static readonly int s_HeightVP = Shader.PropertyToID("_PLOceanRippleHeightVP");
 
     int Res => (int)resolution;
     float TexelSize => areaSize / Res;
 
     void OnEnable()
     {
-        _compute = Resources.Load<ComputeShader>("HPOceanRipple");
-        var heightShader = Shader.Find("Hidden/HPOcean/RippleSceneHeight");
+        _compute = Resources.Load<ComputeShader>("PLOceanRipple");
+        var heightShader = Shader.Find("Hidden/PLOcean/RippleSceneHeight");
         if (_compute == null || heightShader == null)
         {
-            Debug.LogError("HPOcean: 找不到 Resources/HPOceanRipple.compute 或 Hidden/HPOcean/RippleSceneHeight");
+            Debug.LogError("PLOcean: 找不到 Resources/PLOceanRipple.compute 或 Hidden/PLOcean/RippleSceneHeight");
             enabled = false;
             return;
         }
         _kShift = _compute.FindKernel("RippleShift");
         _kUpdate = _compute.FindKernel("RippleUpdate");
         _heightMaterial = new Material(heightShader) { hideFlags = HideFlags.HideAndDontSave };
-        _heightCmd = new CommandBuffer { name = "HPOcean Ripple Scene Height" };
+        _heightCmd = new CommandBuffer { name = "PLOcean Ripple Scene Height" };
 
         AllocateTextures();
         Active = this;
@@ -153,14 +153,14 @@ public class HPOceanRipple : MonoBehaviour
 
     void AllocateTextures()
     {
-        _current = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RippleA");
-        _previous = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RippleB");
-        _temp = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RippleTemp");
+        _current = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RippleA");
+        _previous = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RippleB");
+        _temp = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RippleTemp");
         // 给水面着色器读的副本，带 mip：顶点着色器按网格疏密取 mip，粗网格上不出尖三角
         // （模拟用的几张会和 _temp 互相交换，不能带 mip）
-        _display = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RippleDisplay", 0, true);
-        _sceneHeight = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RippleSceneHeight", 24);
-        _prevSceneHeight = CreateRT(GraphicsFormat.R32_SFloat, "HPOcean_RipplePrevSceneHeight");
+        _display = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RippleDisplay", 0, true);
+        _sceneHeight = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RippleSceneHeight", 24);
+        _prevSceneHeight = CreateRT(GraphicsFormat.R32_SFloat, "PLOcean_RipplePrevSceneHeight");
         _hasOrigin = false;
         _hasPrevSceneHeight = false;
     }
@@ -262,7 +262,7 @@ public class HPOceanRipple : MonoBehaviour
         Shader.SetGlobalVector(s_RippleParams, new Vector4(min.x, min.y, areaSize, TexelSize));
     }
 
-    float WaterLevel => transform.position.y;
+    float SeaLevel => transform.position.y;
 
     // 区域以相机为中心，按整像素对齐；移动时把已有波高整体平移
     void UpdateOrigin(CommandBuffer cmd, Vector3 cameraPos)
@@ -312,7 +312,7 @@ public class HPOceanRipple : MonoBehaviour
         }
 
         Vector2 min = (Vector2)_originTexel * TexelSize;
-        float top = WaterLevel + 50f;
+        float top = SeaLevel + 50f;
         float range = 100f;
         // 自己拼投影：x/z → 裁剪空间 xy，高度 → 深度（越高越近）
         bool flip = SystemInfo.graphicsUVStartsAtTop;
@@ -328,7 +328,7 @@ public class HPOceanRipple : MonoBehaviour
         cmd.SetRenderTarget(_sceneHeight, _sceneHeight.depthBuffer);
         cmd.ClearRenderTarget(true, true, new Color(-1000f, 0, 0, 0));
 
-        var areaBounds = new Bounds(new Vector3(min.x + areaSize * 0.5f, WaterLevel, min.y + areaSize * 0.5f),
+        var areaBounds = new Bounds(new Vector3(min.x + areaSize * 0.5f, SeaLevel, min.y + areaSize * 0.5f),
                                     new Vector3(areaSize, range * 2f, areaSize));
         foreach (var r in _renderers)
         {
@@ -351,7 +351,7 @@ public class HPOceanRipple : MonoBehaviour
         cmd.SetComputeIntParam(_compute, "_Resolution", Res);
         cmd.SetComputeFloatParam(_compute, "_Courant2", courant * courant);
         cmd.SetComputeFloatParam(_compute, "_Retention", 1f - damping);
-        cmd.SetComputeFloatParam(_compute, "_WaterLevel", WaterLevel);
+        cmd.SetComputeFloatParam(_compute, "_SeaLevel", SeaLevel);
         cmd.SetComputeFloatParam(_compute, "_ObstacleOffset", obstacleOffset);
         cmd.SetComputeFloatParam(_compute, "_ShallowDepth", shallowDepth);
         cmd.SetComputeFloatParam(_compute, "_MaxHeight", maxHeight);
@@ -389,7 +389,7 @@ public class HPOceanRipple : MonoBehaviour
             if (cam != null)
             {
                 var ray = cam.ScreenPointToRay(Input.mousePosition);
-                if (new Plane(Vector3.up, new Vector3(0f, WaterLevel, 0f)).Raycast(ray, out float hit))
+                if (new Plane(Vector3.up, new Vector3(0f, SeaLevel, 0f)).Raycast(ray, out float hit))
                 {
                     var p = ray.GetPoint(hit);
                     _sourceArray[count++] = new Vector4(p.x, p.z, mouseRadius, mouseStrength);
@@ -401,7 +401,7 @@ public class HPOceanRipple : MonoBehaviour
         {
             if (count >= MaxSources)
                 break;
-            if (s.TryGetSource(WaterLevel, StepTime, out var source))
+            if (s.TryGetSource(SeaLevel, StepTime, out var source))
                 _sourceArray[count++] = source;
         }
 
