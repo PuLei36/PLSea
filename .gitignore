@@ -1,0 +1,59 @@
+# Unity generated
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.suo
+*.user
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Builds / crash reports
+*.apk
+*.aab
+*.unitypackage
+sysinfo.txt
+crashlytics-build.properties
+
+# Third-party Asset Store content (license forbids redistribution; import separately)
+/Assets/NatureManufacture Assets/
+/Assets/NatureManufacture Assets.meta
+/Assets/Atlantis_Ruins/
+/Assets/Atlantis_Ruins.meta
+/Assets/Island/*.asset
+/Assets/Island/*.asset.meta
+/Assets/Player/Quantum Stage/
+/Assets/Player/Quantum Stage.meta
+/Assets/model/PolyOne/
+/Assets/model/PolyOne.meta
+/Assets/model/angel-sculpture/
+/Assets/model/angel-sculpture.meta
+
+# Editor tooling / template leftovers
+/Assets/Plugins/
+/Assets/Plugins.meta
+/Assets/TutorialInfo/
+/Assets/TutorialInfo.meta
+/Assets/Readme.asset
+/Assets/Readme.asset.meta

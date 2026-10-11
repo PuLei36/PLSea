@@ -1,0 +1,83 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: PLOceanSea
+  m_Shader: {fileID: 4800000, guid: 4de5210d5d014f9438e18783be90224c, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - _PLO_RAYMARCH_REFRACTION
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _FoamMap:
+        m_Texture: {fileID: 2800000, guid: 80525aec8745994479278bad23115c40, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _ScatterRamp:
+        m_Texture: {fileID: 2800000, guid: 589feb3836183d2479cae9bb1439dbe1, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _AmbientScatter: 2.04
+    - _BacklitG: 0.85
+    - _BacklitIntensity: 0.5
+    - _Cascade1Fade: 600
+    - _Cascade2Fade: 150
+    - _CausticDispersion: 0.19
+    - _CausticFadeDistance: 75.3
+    - _CausticIntensity: 0.61
+    - _CausticShallowDepth: 3
+    - _CrestHeight: 1.5
+    - _Dispersion: 0.4
+    - _DistanceRoughness: 0.0003
+    - _EdgeFoamContact: 0.6
+    - _EdgeFoamDistance: 1.5
+    - _EdgeFoamIntensity: 1.28
+    - _EdgeFoamTiling: 0.18
+    - _FoamIntensity: 0.98
+    - _FoamScrollSpeed: 0.02
+    - _FoamTiling: 0.03
+    - _ForwardScatterBlur: 0.1
+    - _MaxCrossDistance: 100
+    - _MultiScatter: 0.3
+    - _NormalStrength: 0.94
+    - _PhaseG: 0.8
+    - _PunctualIntensity: 1.64
+    - _ReflectionIntensity: 1.15
+    - _RefractionMaxDistance: 30
+    - _RefractionRayMarch: 1
+    - _RefractionSteps: 8
+    - _RefractionStrength: 1
+    - _RefractionThickness: 0.5
+    - _RippleFoam: 0.6
+    - _RippleHeightScale: 1.46
+    - _RippleNormalScale: 1
+    - _SSSIntensity: 3.31
+    - _ScatterIntensity: 1.21
+    - _ScatterRampBlend: 1
+    - _ScatterRampDepth: 17.54
+    - _Smoothness: 0.955
+    - _SpecularIntensity: 2.54
+    - _UnderseaFogDensity: 0.3
+    - _UnderseaGodRays: 1.58
+    m_Colors:
+    - _Absorption: {r: 0.35, g: 0.12, b: 0.04, a: 0}
+    - _FoamColor: {r: 0.85, g: 0.9, b: 0.92, a: 1}
+    - _Scattering: {r: 0.006, g: 0.018, b: 0.024, a: 0}
+  m_BuildTextureStacks: []
