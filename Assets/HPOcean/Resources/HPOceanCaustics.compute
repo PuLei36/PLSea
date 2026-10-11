@@ -1,0 +1,125 @@
+// HPOcean 焦散（参考 HPWater 的 HPWaterCausticCompute）
+// HPWater 在光源视角的级联图集里追踪；这里改为在 FFT 中浪级联的平铺域里追踪，结果可无缝平铺到任意水底：
+//   CausticClear    清空累积纹理
+//   CausticSplat    每个光子从水面出发，按真实法线折射，落到 3 个参考深度上，双线性 InterlockedAdd 累积
+//   CausticResolve  定点数还原为能量密度（平均 = 1），À-trous 3x3 边缘保持降噪，再与上一帧做时域混合
+
+#pragma kernel CausticClear
+#pragma kernel CausticSplat
+#pragma kernel CausticResolve
+
+#define RES 256
+#define PHOTON_RES 512
+#define SLICES 3
+#define FIXED_SCALE 1024.0
+#define ETA (1.0 / 1.33)
+
+RWTexture2DArray<uint>  _CausticAccum;
+RWTexture2DArray<float> _Caustic;
+
+Texture2D<float4> _CausticDerivatives;
+Texture2D<float4> _CausticDisplacement;
+SamplerState linear_repeat_sampler;
+
+float  _CausticLength;
+float4 _CausticSunDir;
+float4 _CausticDepths;
+float4 _CausticJitter;      // xy = 光子抖动（像素）
+float  _CausticTemporal;    // 历史权重，首帧为 0
+float  _CausticEdgeWeight;
+float  _CausticNormalMip;   // 法线取高一级 mip：滤掉最短的波，焦散网格更大、更稀疏
+
+[numthreads(8, 8, 1)]
+void CausticClear(uint3 id : SV_DispatchThreadID)
+{
+    [unroll]
+    for (uint s = 0; s < SLICES; s++)
+        _CausticAccum[uint3(id.xy, s)] = 0;
+}
+
+void Splat(float2 texel, uint slice)
+{
+    float2 p = texel - 0.5;
+    int2 base = int2(floor(p));
+    float2 f = p - base;
+
+    [unroll]
+    for (uint i = 0; i < 4; i++)
+    {
+        int2 o = int2(i & 1, i >> 1);
+        float w = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+        uint2 c = uint2(base + o) & (RES - 1);
+        InterlockedAdd(_CausticAccum[uint3(c, slice)], (uint)(w * FIXED_SCALE + 0.5));
+    }
+}
+
+[numthreads(8, 8, 1)]
+void CausticSplat(uint3 id : SV_DispatchThreadID)
+{
+    float2 uv = (id.xy + 0.5 + _CausticJitter.xy) / PHOTON_RES;
+
+    float4 d = _CausticDerivatives.SampleLevel(linear_repeat_sampler, uv, _CausticNormalMip);
+    float2 slope = d.xy / max(1.0 + d.zw, 0.1);
+    float3 n = normalize(float3(-slope.x, 1.0, -slope.y));
+
+    float3 L = normalize(_CausticSunDir.xyz);
+    float3 t = refract(-L, n, ETA);
+    if (dot(t, t) < 1e-6)
+        return;
+
+    // 只保留法线带来的偏折（与 HPWater 一样减掉平面折射），图案与水面对齐
+    float3 t0 = refract(-L, float3(0, 1, 0), ETA);
+    float2 bend = t.xz / max(-t.y, 0.05) - t0.xz / max(-t0.y, 0.05);
+
+    float2 start = uv * _CausticLength + _CausticDisplacement.SampleLevel(linear_repeat_sampler, uv, _CausticNormalMip).xz;
+
+    [unroll]
+    for (uint s = 0; s < SLICES; s++)
+    {
+        float2 land = start + bend * _CausticDepths[s];
+        Splat(land / _CausticLength * RES, s);
+    }
+}
+
+// HPWater 的 À-trous 边缘权重：亮度差越大权重越小，暗部放宽
+float EdgeWeight(float center, float sample)
+{
+    float lumDiff = abs(log2(1.0 + center) - log2(1.0 + sample));
+    float strictness = smoothstep(0.0, 0.25, min(center, sample));
+    return exp2(-lumDiff * _CausticEdgeWeight * strictness);
+}
+
+static const float kAtrous[3] = { 0.25, 0.5, 0.25 };
+
+[numthreads(8, 8, 1)]
+void CausticResolve(uint3 id : SV_DispatchThreadID)
+{
+    // 每个纹素平均落入 (PHOTON_RES / RES)^2 个光子
+    const float normalization = 1.0 / (FIXED_SCALE * (PHOTON_RES / RES) * (PHOTON_RES / RES));
+
+    [unroll]
+    for (uint s = 0; s < SLICES; s++)
+    {
+        float center = _CausticAccum[uint3(id.xy, s)] * normalization;
+        float sum = 0;
+        float weightSum = 0;
+
+        [unroll]
+        for (int y = -1; y <= 1; y++)
+        {
+            [unroll]
+            for (int x = -1; x <= 1; x++)
+            {
+                uint2 c = uint2(int2(id.xy) + int2(x, y)) & (RES - 1);
+                float v = _CausticAccum[uint3(c, s)] * normalization;
+                float w = kAtrous[x + 1] * kAtrous[y + 1] * lerp(EdgeWeight(center, v), 1.0, 0.25);
+                sum += v * w;
+                weightSum += w;
+            }
+        }
+
+        float filtered = sum / max(weightSum, 1e-6);
+        float history = _Caustic[uint3(id.xy, s)];
+        _Caustic[uint3(id.xy, s)] = lerp(filtered, history, _CausticTemporal);
+    }
+}

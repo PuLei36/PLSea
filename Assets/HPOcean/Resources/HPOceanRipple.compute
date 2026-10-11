@@ -1,0 +1,124 @@
+// HPOcean 交互水波（参考 HPWater 的 HPWaterWaveEquation）
+//   RippleShift   模拟区域跟随相机移动时，把波高整体平移若干像素，世界空间里的波纹保持不动
+//   RippleUpdate  二维波动方程（中心差分），障碍物处诺伊曼反射边界，四周海绵层吸收，叠加高斯波源
+//
+// 波高用两张纹理 Ping-Pong：Current 只读（邻居），Previous 原位读写（每个线程只碰自己的像素），
+// 写完后 Previous 就成了下一时刻，C# 端交换两者。
+
+#pragma kernel RippleShift
+#pragma kernel RippleUpdate
+
+#define MAX_SOURCES 32
+
+Texture2D<float>   _ShiftSrc;
+RWTexture2D<float> _ShiftDst;
+int2 _Shift;
+
+Texture2D<float>   _RippleCurrent;
+RWTexture2D<float> _RipplePrevious;   // 输入 t-1，输出 t+1
+Texture2D<float>   _SceneHeight;      // 俯视渲染的场景高度，没有物体处为很小的负数
+Texture2D<float>   _PrevSceneHeight;  // 上一帧的场景高度（已按区域平移对齐）
+float  _Displace;          // 物体占据/离开一个格子时推高/拉低的米数，只在每帧第一步非 0
+
+int    _Resolution;
+float  _Courant2;          // (c·Δt/Δx)²，CFL 要求 c·Δt/Δx < 0.707
+float  _Retention;         // 每步保留的速度（1 - 阻尼）
+float  _WaterLevel;
+float  _ObstacleOffset;    // 场景高于水面多少米算障碍
+float  _ShallowDepth;      // 浅于此深度的区域额外衰减
+float  _MaxHeight;
+float  _StepTime;          // 每步时长（秒），波源按它累积
+float4 _BoxMin;            // xy = 模拟区域左下角世界 XZ，z = 像素尺寸（米）
+int    _SourceCount;
+float4 _Sources[MAX_SOURCES]; // xy = 世界 XZ，z = 半径（米），w = 每秒推高的米数（负数为下压）
+
+[numthreads(8, 8, 1)]
+void RippleShift(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= (uint)_Resolution))
+        return;
+    int2 src = int2(id.xy) + _Shift;
+    bool inside = all(src >= 0) && all(src < _Resolution);
+    _ShiftDst[id.xy] = inside ? _ShiftSrc[src] : 0.0;
+}
+
+bool IsObstacle(int2 c)
+{
+    return _SceneHeight[c] > _WaterLevel + _ObstacleOffset;
+}
+
+bool WasObstacle(int2 c)
+{
+    return _PrevSceneHeight[c] > _WaterLevel + _ObstacleOffset;
+}
+
+[numthreads(8, 8, 1)]
+void RippleUpdate(uint3 id : SV_DispatchThreadID)
+{
+    int res = _Resolution;
+    if (any(id.xy >= (uint)res))
+        return;
+    int2 c = int2(id.xy);
+
+    if (IsObstacle(c))
+    {
+        _RipplePrevious[c] = 0;
+        return;
+    }
+
+    float u = _RippleCurrent[c];
+    float uPrev = _RipplePrevious[c];
+
+    // 越界或障碍物：邻居取自己 → 法向导数为 0 → 反射
+    float uL = (c.x > 0       && !IsObstacle(c + int2(-1, 0))) ? _RippleCurrent[c + int2(-1, 0)] : u;
+    float uR = (c.x < res - 1 && !IsObstacle(c + int2( 1, 0))) ? _RippleCurrent[c + int2( 1, 0)] : u;
+    float uD = (c.y > 0       && !IsObstacle(c + int2(0, -1))) ? _RippleCurrent[c + int2(0, -1)] : u;
+    float uU = (c.y < res - 1 && !IsObstacle(c + int2(0,  1))) ? _RippleCurrent[c + int2(0,  1)] : u;
+    float laplacian = uL + uR + uD + uU - 4.0 * u;
+
+    // 海绵层：四周 10% 宽度逐渐吸收，避免波碰到模拟边界反弹回来
+    float thickness = res * 0.1;
+    float edgeX = 1.0 - smoothstep(0.0, thickness, (float)min(c.x, res - 1 - c.x));
+    float edgeY = 1.0 - smoothstep(0.0, thickness, (float)min(c.y, res - 1 - c.y));
+    float edge = 1.0 - (1.0 - edgeX) * (1.0 - edgeY);
+    float absorption = saturate(1.0 - edge * edge);
+
+    // 浅滩：越浅衰减越快，波纹不会在沙滩上来回弹
+    float bedDepth = _WaterLevel - _SceneHeight[c];
+    float shallow = _ShallowDepth > 0 ? lerp(0.9, 1.0, saturate(bedDepth / _ShallowDepth)) : 1.0;
+
+    float retention = _Retention * absorption * shallow;
+    float uNext = u + (u - uPrev) * retention + _Courant2 * laplacian;
+
+    // 穿过水面的物体移动：邻居刚被占住 → 水被挤开推高；自己刚被让出 → 水回填下陷
+    if (_Displace != 0)
+    {
+        int pushed = 0;
+        [unroll] for (int y = -1; y <= 1; y++)
+        [unroll] for (int x = -1; x <= 1; x++)
+        {
+            int2 n = clamp(c + int2(x, y), 0, res - 1);
+            pushed += (IsObstacle(n) && !WasObstacle(n)) ? 1 : 0;
+        }
+        uNext += _Displace * pushed * 0.25 * absorption;
+        if (WasObstacle(c))
+            uNext -= _Displace * absorption;
+    }
+
+    // 高斯波源
+    float2 worldXZ = _BoxMin.xy + (float2(c) + 0.5) * _BoxMin.z;
+    for (int i = 0; i < _SourceCount; i++)
+    {
+        float4 s = _Sources[i];
+        float2 d = worldXZ - s.xy;
+        float r2 = dot(d, d);
+        float radius = max(s.z, _BoxMin.z);
+        if (r2 < radius * radius)
+        {
+            float sigma = radius * 0.4;
+            uNext += s.w * _StepTime * exp(-r2 / (2.0 * sigma * sigma)) * absorption;
+        }
+    }
+
+    _RipplePrevious[c] = clamp(uNext, -_MaxHeight, _MaxHeight);
+}

@@ -1,0 +1,294 @@
+// HPOcean FFT 海浪模拟
+// 每个级联（cascade）独立调度一遍：
+//   InitSpectrum   : 参数变化时生成初始频谱 h0(k)（JONSWAP + Donelan-Banner 方向分布）
+//   UpdateSpectrum : 每帧按色散关系推进相位，并打包 8 个实数场到 2 张复数纹理
+//   IFFTHorizontal / IFFTVertical : groupshared Stockham IFFT（行、列各一遍）
+//   Assemble       : 符号校正，输出位移、导数，并用 Jacobian 累积泡沫
+
+#pragma kernel InitSpectrum
+#pragma kernel UpdateSpectrum
+#pragma kernel IFFTHorizontal
+#pragma kernel IFFTVertical
+#pragma kernel Assemble
+
+#define SIZE 256
+#define LOG_SIZE 8
+
+static const float PI = 3.14159265359;
+static const float TWO_PI = 6.28318530718;
+static const float GRAVITY = 9.81;
+
+// 级联参数
+float _LengthScale;
+float _CutoffLow;
+float _CutoffHigh;
+uint  _Seed;
+
+// 频谱参数
+float _WindSpeed;       // m/s
+float _WindAngle;       // 弧度
+float _Fetch;           // m
+float _Depth;           // m
+float _PeakEnhancement; // JONSWAP gamma
+float _Directionality;  // 0 = 各向同性，1 = 完全按风向分布
+float _ShortWavesFade;  // m，抑制极短波
+float _Amplitude;
+
+// 动画参数
+float _Time;
+float _DeltaTime;
+float _Choppiness;
+float _FoamThreshold;
+float _FoamSharpness;
+float _FoamDecay;
+
+RWTexture2D<float4> _H0;
+Texture2D<float4>   _H0Read;
+
+Texture2D<float4>   _InA;
+Texture2D<float4>   _InB;
+RWTexture2D<float4> _OutA;
+RWTexture2D<float4> _OutB;
+
+RWTexture2D<float4> _Displacement;
+RWTexture2D<float4> _Derivatives;
+RWTexture2D<float>  _Turbulence;
+
+// ---------------------------------------------------------------------------
+// 工具函数
+// ---------------------------------------------------------------------------
+
+float2 ComplexMul(float2 a, float2 b)
+{
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+// i * z
+float2 MulI(float2 z)
+{
+    return float2(-z.y, z.x);
+}
+
+uint PcgHash(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float Random01(uint v)
+{
+    return (PcgHash(v) & 0x00ffffffu) / 16777216.0;
+}
+
+// Box-Muller，返回两个独立的标准正态分布随机数
+float2 Gaussian(uint2 id)
+{
+    uint s = (id.y * SIZE + id.x) * 2u + _Seed * (SIZE * SIZE * 2u);
+    float u1 = max(Random01(s), 1e-7);
+    float u2 = Random01(s ^ 0x9e3779b9u);
+    float r = sqrt(-2.0 * log(u1));
+    float theta = TWO_PI * u2;
+    return float2(r * cos(theta), r * sin(theta));
+}
+
+float Omega(float k)
+{
+    return sqrt(GRAVITY * k * tanh(min(k * _Depth, 20.0)));
+}
+
+float OmegaDerivative(float k)
+{
+    float kh = min(k * _Depth, 20.0);
+    float th = tanh(kh);
+    float w = sqrt(GRAVITY * k * th);
+    return GRAVITY * (th + kh * (1.0 - th * th)) / (2.0 * max(w, 1e-6));
+}
+
+float PeakOmega()
+{
+    return 22.0 * pow(max(GRAVITY * GRAVITY / max(_WindSpeed * _Fetch, 1e-3), 1e-6), 1.0 / 3.0);
+}
+
+float JONSWAP(float w)
+{
+    float wp = PeakOmega();
+    float alpha = 0.076 * pow(max(_WindSpeed * _WindSpeed / max(_Fetch * GRAVITY, 1e-3), 1e-6), 0.22);
+    float sigma = w <= wp ? 0.07 : 0.09;
+    float r = exp(-(w - wp) * (w - wp) / (2.0 * sigma * sigma * wp * wp));
+    return alpha * GRAVITY * GRAVITY / pow(w, 5.0) * exp(-1.25 * pow(wp / w, 4.0)) * pow(max(_PeakEnhancement, 1.0), r);
+}
+
+// Donelan-Banner 方向分布，在 [-π, π] 上积分为 1
+float DirectionalSpread(float theta, float w)
+{
+    float ratio = w / PeakOmega();
+    float beta;
+    if (ratio < 0.95)
+        beta = 2.61 * pow(ratio, 1.3);
+    else if (ratio < 1.6)
+        beta = 2.28 * pow(ratio, -1.3);
+    else
+        beta = pow(10.0, -0.4 + 0.8393 * exp(-0.567 * log(ratio * ratio)));
+
+    float c = cosh(beta * theta);
+    float d = beta / (2.0 * tanh(beta * PI)) / (c * c);
+    return lerp(1.0 / TWO_PI, d, saturate(_Directionality));
+}
+
+// 波数空间的频谱密度 S(k)，单位 m^4
+float Spectrum(float2 k)
+{
+    float kl = length(k);
+    if (kl < max(_CutoffLow, 1e-6) || kl > _CutoffHigh)
+        return 0.0;
+
+    float w = Omega(kl);
+    float theta = atan2(k.y, k.x) - _WindAngle;
+    theta = theta - TWO_PI * floor((theta + PI) / TWO_PI);
+
+    float s = JONSWAP(w) * DirectionalSpread(theta, w) * OmegaDerivative(kl) / kl;
+    s *= exp(-kl * kl * _ShortWavesFade * _ShortWavesFade);
+    return s;
+}
+
+float2 WaveVector(uint2 id)
+{
+    return (float2(id) - SIZE * 0.5) * (TWO_PI / _LengthScale);
+}
+
+// ---------------------------------------------------------------------------
+// 初始频谱：xy = h0(k)，zw = conj(h0(-k))
+// ---------------------------------------------------------------------------
+
+[numthreads(8, 8, 1)]
+void InitSpectrum(uint3 id : SV_DispatchThreadID)
+{
+    float dk = TWO_PI / _LengthScale;
+    uint2 idNeg = (SIZE - id.xy) & (SIZE - 1);
+
+    // E|h0|² = S(k) dk² / 2，保证海面高度方差 = ∫S(k) dk
+    float2 h = Gaussian(id.xy) * (sqrt(Spectrum(WaveVector(id.xy)) * 0.5) * dk * _Amplitude * 0.70710678);
+    float2 hNeg = Gaussian(idNeg) * (sqrt(Spectrum(WaveVector(idNeg)) * 0.5) * dk * _Amplitude * 0.70710678);
+
+    _H0[id.xy] = float4(h, hNeg.x, -hNeg.y);
+}
+
+// ---------------------------------------------------------------------------
+// 时间推进 + 打包
+//   A = (Dx + i·Dy,     Dz + i·dYdx)
+//   B = (dYdz + i·dXdx, dZdz + i·dXdz)
+// 两个实数场打包到一个复数里做 IFFT，结果实部/虚部各自就是一个场
+// ---------------------------------------------------------------------------
+
+[numthreads(8, 8, 1)]
+void UpdateSpectrum(uint3 id : SV_DispatchThreadID)
+{
+    float4 h0 = _H0Read[id.xy];
+    float2 k = WaveVector(id.xy);
+    float kl = length(k);
+    float invK = kl > 1e-6 ? 1.0 / kl : 0.0;
+
+    float phase = Omega(kl) * _Time;
+    float2 e = float2(cos(phase), sin(phase));
+    float2 h = ComplexMul(h0.xy, e) + ComplexMul(h0.zw, float2(e.x, -e.y));
+    float2 ih = MulI(h);
+
+    // 水平位移取 +i·k/|k|·h，配合 x + λD 得到尖锐的波峰
+    float2 dx = ih * (k.x * invK);
+    float2 dz = ih * (k.y * invK);
+    float2 dy = h;
+    float2 dYdx = ih * k.x;
+    float2 dYdz = ih * k.y;
+    float2 dXdx = -h * (k.x * k.x * invK);
+    float2 dZdz = -h * (k.y * k.y * invK);
+    float2 dXdz = -h * (k.x * k.y * invK);
+
+    _OutA[id.xy] = float4(dx + MulI(dy), dz + MulI(dYdx));
+    _OutB[id.xy] = float4(dYdz + MulI(dXdx), dZdz + MulI(dXdz));
+}
+
+// ---------------------------------------------------------------------------
+// Stockham IFFT（groupshared，一个线程组处理一行/一列，同时处理 A、B 两张纹理）
+// ---------------------------------------------------------------------------
+
+groupshared float4 gsA[2][SIZE];
+groupshared float4 gsB[2][SIZE];
+
+float4 TwiddleMul(float2 w, float4 v)
+{
+    return float4(ComplexMul(w, v.xy), ComplexMul(w, v.zw));
+}
+
+uint RunIFFT(uint idx)
+{
+    uint src = 0;
+    [unroll]
+    for (uint stage = 0; stage < LOG_SIZE; stage++)
+    {
+        uint b = SIZE >> (stage + 1);
+        uint w = b * (idx / b);
+        uint i = (w + idx) & (SIZE - 1);
+        float angle = TWO_PI * w / SIZE;
+        float2 twiddle = float2(cos(angle), sin(angle));
+
+        gsA[1 - src][idx] = gsA[src][i] + TwiddleMul(twiddle, gsA[src][i + b]);
+        gsB[1 - src][idx] = gsB[src][i] + TwiddleMul(twiddle, gsB[src][i + b]);
+        src = 1 - src;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return src;
+}
+
+[numthreads(SIZE, 1, 1)]
+void IFFTHorizontal(uint3 id : SV_DispatchThreadID)
+{
+    uint2 coord = id.xy;
+    gsA[0][id.x] = _InA[coord];
+    gsB[0][id.x] = _InB[coord];
+    GroupMemoryBarrierWithGroupSync();
+
+    uint src = RunIFFT(id.x);
+    _OutA[coord] = gsA[src][id.x];
+    _OutB[coord] = gsB[src][id.x];
+}
+
+[numthreads(SIZE, 1, 1)]
+void IFFTVertical(uint3 id : SV_DispatchThreadID)
+{
+    uint2 coord = id.yx;
+    gsA[0][id.x] = _InA[coord];
+    gsB[0][id.x] = _InB[coord];
+    GroupMemoryBarrierWithGroupSync();
+
+    uint src = RunIFFT(id.x);
+    _OutA[coord] = gsA[src][id.x];
+    _OutB[coord] = gsB[src][id.x];
+}
+
+// ---------------------------------------------------------------------------
+// 输出：位移 / 导数 / 泡沫
+// ---------------------------------------------------------------------------
+
+[numthreads(8, 8, 1)]
+void Assemble(uint3 id : SV_DispatchThreadID)
+{
+    // 频谱中心化带来的 (-1)^(x+y)
+    float s = ((id.x + id.y) & 1u) ? -1.0 : 1.0;
+    float4 a = _InA[id.xy] * s;
+    float4 b = _InB[id.xy] * s;
+
+    float dx = a.x, dy = a.y, dz = a.z, dYdx = a.w;
+    float dYdz = b.x, dXdx = b.y, dZdz = b.z, dXdz = b.w;
+    float lambda = _Choppiness;
+
+    _Displacement[id.xy] = float4(lambda * dx, dy, lambda * dz, 0.0);
+    _Derivatives[id.xy] = float4(dYdx, dYdz, lambda * dXdx, lambda * dZdz);
+
+    // Jacobian < 1 表示水面被挤压（波峰破碎），用来生成泡沫
+    float jacobian = (1.0 + lambda * dXdx) * (1.0 + lambda * dZdz) - lambda * lambda * dXdz * dXdz;
+    float inject = saturate((_FoamThreshold - jacobian) * _FoamSharpness);
+
+    float foam = _Turbulence[id.xy] * exp(-_FoamDecay * _DeltaTime);
+    _Turbulence[id.xy] = saturate(max(foam, inject));
+}
