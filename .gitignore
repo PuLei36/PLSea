@@ -57,3 +57,13 @@ crashlytics-build.properties
 /Assets/TutorialInfo.meta
 /Assets/Readme.asset
 /Assets/Readme.asset.meta
+
+# Scenes built on NatureManufacture demo content (copyrighted) and old maps
+/Assets/OutdoorsScene*.unity
+/Assets/OutdoorsScene*.unity.meta
+/Assets/Island/
+/Assets/Island.meta
+
+# PLCloud 的开发笔记，内容已并入根目录 README
+/Assets/PLCloud/PLCloud_README.md
+/Assets/PLCloud/PLCloud_README.md.meta

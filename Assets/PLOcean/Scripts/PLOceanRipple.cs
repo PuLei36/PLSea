@@ -89,7 +89,8 @@ public class PLOceanRipple : MonoBehaviour
     bool _hasPrevSceneHeight;
     Material _heightMaterial;
     CommandBuffer _heightCmd;
-    readonly List<Renderer> _renderers = new List<Renderer>();
+    // 场景高度要画的 Renderer 和它的子网格数（刷新时算好，免得每帧 GetComponent）
+    readonly List<(Renderer renderer, int subMeshCount)> _renderers = new List<(Renderer, int)>();
     float _nextRendererRefresh;
 
     Vector2Int _originTexel;     // 区域左下角的世界整像素坐标
@@ -122,6 +123,7 @@ public class PLOceanRipple : MonoBehaviour
         _heightCmd = new CommandBuffer { name = "PLOcean Ripple Scene Height" };
 
         AllocateTextures();
+        _seaLevel = transform.position.y;
         Active = this;
         _lastTime = CurrentTime();
         _nextRendererRefresh = 0f;
@@ -235,6 +237,7 @@ public class PLOceanRipple : MonoBehaviour
         var cmd = _heightCmd;
         cmd.Clear();
         UpdateOrigin(cmd, cam.transform.position);
+        UpdateSeaLevel();
         RenderSceneHeight(cmd);
 
         _accumulator = Mathf.Min(_accumulator + dt, StepTime * MaxStepsPerFrame);
@@ -262,7 +265,19 @@ public class PLOceanRipple : MonoBehaviour
         Shader.SetGlobalVector(s_RippleParams, new Vector4(min.x, min.y, areaSize, TexelSize));
     }
 
-    float SeaLevel => transform.position.y;
+    // 模拟区域中心处的球面海平面：区域只有几十米，区域内曲率下沉的差别不到几厘米，取中心一个值即可。
+    // 离世界原点几公里时下沉量已经到米级，不扣掉的话障碍物 / 浅滩 / 波源的吃水判断都会偏
+    float _seaLevel;
+    float SeaLevel => _seaLevel;
+
+    /// <summary>模拟区域内的海平面高度（已扣除地球曲率下沉），涉水、波源判断吃水用。</summary>
+    public float LocalSeaLevel => _seaLevel;
+
+    void UpdateSeaLevel()
+    {
+        Vector2 center = (Vector2)_originTexel * TexelSize + Vector2.one * (areaSize * 0.5f);
+        _seaLevel = transform.position.y - SeaMesh.PlanetDrop(center.x, center.y);
+    }
 
     // 区域以相机为中心，按整像素对齐；移动时把已有波高整体平移
     void UpdateOrigin(CommandBuffer cmd, Vector3 cameraPos)
@@ -306,8 +321,16 @@ public class PLOceanRipple : MonoBehaviour
             _renderers.Clear();
             foreach (var r in FindObjectsOfType<Renderer>())
             {
-                if ((r is MeshRenderer || r is SkinnedMeshRenderer) && (obstacleLayers.value & (1 << r.gameObject.layer)) != 0)
-                    _renderers.Add(r);
+                if ((obstacleLayers.value & (1 << r.gameObject.layer)) == 0)
+                    continue;
+                int subMeshCount = r switch
+                {
+                    MeshRenderer => r.TryGetComponent<MeshFilter>(out var filter) && filter.sharedMesh != null ? filter.sharedMesh.subMeshCount : 0,
+                    SkinnedMeshRenderer skinned => skinned.sharedMesh != null ? skinned.sharedMesh.subMeshCount : 0,
+                    _ => 0,
+                };
+                if (subMeshCount > 0)
+                    _renderers.Add((r, subMeshCount));
             }
         }
 
@@ -330,12 +353,10 @@ public class PLOceanRipple : MonoBehaviour
 
         var areaBounds = new Bounds(new Vector3(min.x + areaSize * 0.5f, SeaLevel, min.y + areaSize * 0.5f),
                                     new Vector3(areaSize, range * 2f, areaSize));
-        foreach (var r in _renderers)
+        foreach (var (r, subMeshCount) in _renderers)
         {
             if (r == null || s_Excluded.Contains(r) || !r.enabled || !r.gameObject.activeInHierarchy || !r.bounds.Intersects(areaBounds))
                 continue;
-            int subMeshCount = r is MeshRenderer ? (r.GetComponent<MeshFilter>()?.sharedMesh?.subMeshCount ?? 0)
-                                                 : (((SkinnedMeshRenderer)r).sharedMesh?.subMeshCount ?? 0);
             for (int i = 0; i < subMeshCount; i++)
                 cmd.DrawRenderer(r, _heightMaterial, i, 0);
         }

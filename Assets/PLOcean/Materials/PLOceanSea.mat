@@ -56,10 +56,10 @@ Material:
     - _ForwardScatterBlur: 0.1
     - _MaxCrossDistance: 100
     - _MultiScatter: 0.3
-    - _NormalStrength: 0.94
+    - _NormalStrength: 1
     - _PhaseG: 0.8
     - _PunctualIntensity: 1.64
-    - _ReflectionIntensity: 1.15
+    - _ReflectionIntensity: 1.24
     - _RefractionMaxDistance: 30
     - _RefractionRayMarch: 1
     - _RefractionSteps: 8
@@ -69,11 +69,11 @@ Material:
     - _RippleHeightScale: 1.46
     - _RippleNormalScale: 1
     - _SSSIntensity: 3.31
-    - _ScatterIntensity: 1.21
+    - _ScatterIntensity: 0.38
     - _ScatterRampBlend: 1
     - _ScatterRampDepth: 17.54
     - _Smoothness: 0.955
-    - _SpecularIntensity: 2.54
+    - _SpecularIntensity: 2.62
     - _UnderseaFogDensity: 0.3
     - _UnderseaGodRays: 1.58
     m_Colors:

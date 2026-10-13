@@ -107,7 +107,7 @@ public class PLOceanWader : MonoBehaviour, PLOceanRipple.IEmitter
         var ripple = PLOceanRipple.Active;
         if (ripple == null)
             return;
-        float seaLevel = ripple.transform.position.y;
+        float seaLevel = ripple.LocalSeaLevel;
         float dt = Mathf.Max(Time.deltaTime, 1e-4f);
         float blend = velocitySmoothing > 0f ? 1f - Mathf.Exp(-dt / velocitySmoothing) : 1f;
         float idle = idleStrength * Mathf.Sin(Time.time * 2f * Mathf.PI * 0.7f);

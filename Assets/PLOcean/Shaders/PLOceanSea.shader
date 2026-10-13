@@ -174,6 +174,38 @@ Shader "PLOcean/Sea"
     float4 _PLOceanLengthScales;
     float _PLOceanTime;
     float _PLOceanSeaLevel;
+    // 行星半径（米，SeaMesh 设置，与 PBR 天空、PLCloud 一致），球心在 (0, 海平面 - R, 0)；0 = 平面海
+    float _PLOceanPlanetRadius;
+
+    // 球面海平面在世界 XZ 处相对平面海平面的下沉量：R - sqrt(R² - r²) = r² / (R + sqrt(R² - r²))，
+    // 写成这种形式避免 R² 与 r² 大数相减丢精度
+    float PlanetDrop(float2 xzAbs)
+    {
+        if (_PLOceanPlanetRadius <= 0.0)
+            return 0.0;
+        float r2 = dot(xzAbs, xzAbs);
+        float R = _PLOceanPlanetRadius;
+        return r2 / (R + sqrt(max(R * R - r2, 0.0)));
+    }
+
+    // 球面上的"上"方向
+    float3 PlanetUp(float2 xzAbs)
+    {
+        if (_PLOceanPlanetRadius <= 0.0)
+            return float3(0.0, 1.0, 0.0);
+        return normalize(float3(xzAbs.x, _PLOceanPlanetRadius - PlanetDrop(xzAbs), xzAbs.y));
+    }
+
+    // 把平面海的切线空间法线（以 +Y 为上）旋转到球面局部"上"方向。
+    // 相机周围几公里内转角不到 0.03°，远处海面的反射因此对着正确的天空，地平线的菲涅尔也随之变化
+    float3 CurveNormal(float3 N, float2 xzAbs)
+    {
+        float3 up = PlanetUp(xzAbs);
+        // 绕 cross(+Y, up) 把 +Y 转到 up（Rodrigues，up 接近 +Y 时数值稳定）
+        float3 axis = float3(up.z, 0.0, -up.x);
+        float c = up.y;
+        return N * c + cross(axis, N) + axis * (dot(axis, N) / (1.0 + c));
+    }
 
     // 焦散（PLOceanSimulation）：x = 平铺尺寸，y = 是否可用，z = 图案放大倍数；深度切片 xyz
     TEXTURE2D_ARRAY(_PLOceanCaustics);
@@ -228,7 +260,7 @@ Shader "PLOcean/Sea"
         {
             float3 p = mul(_PLOceanHullWorldToLocal[h], float4(positionAbs, 1.0)).xyz;
             float4 prm = _PLOceanHullParams[h];
-            if (p.z < prm.x || p.z > prm.y)
+            if (prm.z < 2.0 || prm.y - prm.x < 1e-4 || p.z < prm.x || p.z > prm.y)
                 continue;
             float f = (p.z - prm.x) / (prm.y - prm.x) * (prm.z - 1.0);
             int i = min((int)f, (int)prm.z - 2);
@@ -272,6 +304,16 @@ Shader "PLOcean/Sea"
     {
         float3 safeK = abs(k) < 1e-5 ? 1e-5 : k;
         return (exp(-safeK * t0) - exp(-safeK * t1)) / safeK;
+    }
+
+    // ∫[t0,t1] exp(-(offset + k t)) dt。offset + k t 是从水面到采样点的总光学厚度，在积分区间内始终 >= 0，
+    // 所以先合并再求指数，k < 0（仰视、越往前越浅）时也不会出现 inf × 0
+    float3 SegmentIntegralOffset(float3 k, float3 offset, float t0, float t1)
+    {
+        float3 safeK = abs(k) < 1e-5 ? 1e-5 : k;
+        float3 a = max(offset + safeK * t0, 0.0);
+        float3 b = max(offset + safeK * t1, 0.0);
+        return (exp(-a) - exp(-b)) / safeK;
     }
 
     // 水下光程 → 颜色金字塔 mip（散射越强，越浅就越模糊）
@@ -389,7 +431,7 @@ Shader "PLOcean/Sea"
         slope += ripple.gradient;
 
         OceanSurface s;
-        s.normalWS = normalize(float3(-slope.x, 1.0, -slope.y));
+        s.normalWS = CurveNormal(normalize(float3(-slope.x, 1.0, -slope.y)), rippleXZ);
         s.turbulence = SAMPLE_TEXTURE2D(_PLOceanTurbulence0, sampler_PLOceanDerivatives0, xz / Ls.x).r
                      + SAMPLE_TEXTURE2D(_PLOceanTurbulence1, sampler_PLOceanDerivatives0, xz / Ls.y).r
                      + SAMPLE_TEXTURE2D(_PLOceanTurbulence2, sampler_PLOceanDerivatives0, xz / Ls.z).r * cascade2Weight * 0.5;
@@ -419,7 +461,7 @@ Shader "PLOcean/Sea"
         float3 d = SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement0, s_linear_repeat_sampler, xz / Ls.x, 0).xyz
                  + SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement1, s_linear_repeat_sampler, xz / Ls.y, 0).xyz
                  + SAMPLE_TEXTURE2D_LOD(_PLOceanDisplacement2, s_linear_repeat_sampler, xz / Ls.z, 0).xyz;
-        d.y += SampleRipple(xz + d.xz).height;
+        d.y += SampleRippleHeight(xz + d.xz, 0.0);
         return d;
     }
 
@@ -432,7 +474,7 @@ Shader "PLOcean/Sea"
         [unroll]
         for (int i = 0; i < 3; i++)
             x0 = xzAbs - OceanDisplacementAt(x0).xz;
-        return _PLOceanSeaLevel + OceanDisplacementAt(x0).y;
+        return _PLOceanSeaLevel + OceanDisplacementAt(x0).y - PlanetDrop(xzAbs);
     }
 
     // ------------------------------------------------------------------
@@ -886,7 +928,7 @@ Shader "PLOcean/Sea"
     {
         float4 positionCS : SV_POSITION;
         float3 positionRWS : TEXCOORD0;
-        float4 oceanData : TEXCOORD1; // xy = 未位移的世界 XZ（纹理坐标），z = 位移高度
+        float4 oceanData : TEXCOORD1; // xy = 未位移的世界 XZ（纹理坐标），z = 浪高（不含曲率下沉）
     };
 
     Varyings Vert(Attributes input)
@@ -909,11 +951,15 @@ Shader "PLOcean/Sea"
 
         // 波纹在世界空间里静止，要按 FFT 水平位移之后的位置采样
         disp.y += SampleRippleHeight(xz + disp.xz, max(dist * 0.0625, _PLOceanRippleParams.w));
+        // 浪高（不含曲率下沉）留给波峰泡沫用，否则离原点几公里后波峰泡沫会被下沉量吃掉
+        float waveHeight = disp.y;
+        // 地球曲率：沿竖直方向下沉（相机周围几公里内与沿球面法线下沉的差别远小于 1 mm）
+        disp.y -= PlanetDrop(xz + disp.xz);
         positionRWS += disp;
 
         output.positionCS = TransformWorldToHClip(positionRWS);
         output.positionRWS = positionRWS;
-        output.oceanData = float4(xz, disp.y, 0.0);
+        output.oceanData = float4(xz, waveHeight, 0.0);
         return output;
     }
 
@@ -1229,8 +1275,10 @@ Shader "PLOcean/Sea"
         // 近平面在水上、但视线在近裁剪距离内就钻进水里：那一截水面网格被裁掉了，
         // 像素直接看到了水底。命中的不是水面、且命中点在水下，同样按水下处理。
         // 只在近裁剪面本身贴着水面时才成立；否则岸边水面网格没盖住、但解析浪高略高于沙面的沙子
-        // 会被误判成水下，染上一块块水雾色（相机高于水面 maxWaveHeight 后整个 Pass 跳过，所以远看消失）
-        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0 && submerged > -2.0 * _ProjectionParams.y)
+        // 会被误判成水下，染上一块块水雾色（相机高于水面 maxWaveHeight 后整个 Pass 跳过，所以远看消失）。
+        // 门槛再限制在 0.5m 以内：Scene 视图的 Dynamic Clipping 在大场景里会把近裁剪面推到好几米，
+        // 单用近裁剪距离的倍数会让整片岸边重新满足条件
+        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0 && submerged > -min(2.0 * _ProjectionParams.y, 0.5))
         {
             float3 hitAbs = GetAbsolutePositionWS(positionRWS);
             if (hitAbs.y < OceanHeightAt(hitAbs.xz))
@@ -1256,9 +1304,16 @@ Shader "PLOcean/Sea"
         float muSun = SunRefractedCos(L, sunRefract);
         float exposure = GetCurrentExposureMultiplier();
 
-        // 直接看到的水底：焦散（只作用于不透明物体，不作用于水面背面）
-        float pixelDepth = _PLOceanSeaLevel - GetAbsolutePositionWS(positionRWS).y;
-        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0 && pixelDepth > 0.05)
+        // 直接看到的水底：焦散（只作用于不透明物体，不作用于水面背面）。
+        // 水深按该点的真实浪高算：水面背面的深度约为 0，不会被当成水底；按平均海平面算的话，
+        // 波谷处的水面背面低于海平面，会被叠上焦散
+        float pixelDepth = 0.0;
+        if (!isSky && (stencil & PLO_STENCIL_SEA) == 0)
+        {
+            float3 pixelAbs = GetAbsolutePositionWS(positionRWS);
+            pixelDepth = OceanHeightAt(pixelAbs.xz) - pixelAbs.y;
+        }
+        if (pixelDepth > 0.15)
         {
             float bedShadow = SampleSunShadowCheap(light, positionRWS);
             color *= CausticModulation(positionRWS, pixelDepth, L, bedShadow, length(positionRWS));
@@ -1268,6 +1323,7 @@ Shader "PLOcean/Sea"
         float d0 = max(submerged, 0.0);
         float rate = -viewDir.y;
         float3 k = sigmaT * (1.0 + rate / muSun);
+        float3 sunOffset = sigmaT * d0 / muSun;
         float phase = SeaPhase(dot(viewDir, -sunRefract));
         float dither = InterleavedGradientNoise(positionSS, _TaaFrameInfo.z);
 
@@ -1286,16 +1342,16 @@ Shader "PLOcean/Sea"
             float t1 = (nextExp - 1.0) * kDenom * marchLength;
             float ts = lerp(t0, t1, dither);
             float shadow = SampleSunShadowCheap(light, nearRWS + viewDir * ts);
-            sunScatter += lerp(1.0, shadow, saturate(_UnderseaGodRays)) * SegmentIntegral(k, t0, t1);
+            sunScatter += lerp(1.0, shadow, saturate(_UnderseaGodRays)) * SegmentIntegralOffset(k, sunOffset, t0, t1);
             currentExp = nextExp;
         }
         // 超过步进距离的部分不再采样阴影
-        sunScatter += SegmentIntegral(k, marchLength, dist);
-        sunScatter *= sunColor * exp(-sigmaT * d0 / muSun) * sigmaS * phase * _ScatterIntensity * max(_UnderseaGodRays, 0.5);
+        sunScatter += SegmentIntegralOffset(k, sunOffset, marchLength, dist);
+        sunScatter *= sunColor * sigmaS * phase * _ScatterIntensity * max(_UnderseaGodRays, 0.5);
 
         float3 ambientDown = SampleSH9(_AmbientProbeData, float3(0, 1, 0));
         float3 kAmb = sigmaT * (1.0 + rate / 0.7);
-        float3 ambientScatter = ambientDown * exp(-sigmaT * d0 / 0.7) * sigmaS * 0.5 * SegmentIntegral(kAmb, 0.0, dist) * _AmbientScatter;
+        float3 ambientScatter = ambientDown * sigmaS * 0.5 * SegmentIntegralOffset(kAmb, sigmaT * d0 / 0.7, 0.0, dist) * _AmbientScatter;
 
         float3 transmittance = exp(-sigmaT * dist);
         color = color * transmittance + (sunScatter + ambientScatter) * exposure;

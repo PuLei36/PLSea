@@ -10,12 +10,24 @@ using UnityEngine.Rendering.HighDefinition;
 public static class PLOceanCameraIds
 {
     static readonly Dictionary<Camera, int> s_Ids = new Dictionary<Camera, int>();
+    static readonly List<Camera> s_Dead = new List<Camera>();
+    static int s_Next = 1;
 
     public static int Get(Camera camera)
     {
         if (!s_Ids.TryGetValue(camera, out int id))
         {
-            id = s_Ids.Count + 1;
+            // 新相机出现时清掉已销毁的相机，字典不会无限增长；编号单调递增，不会和旧的体积缓冲撞号
+            foreach (var pair in s_Ids)
+            {
+                if (pair.Key == null)
+                    s_Dead.Add(pair.Key);
+            }
+            foreach (var dead in s_Dead)
+                s_Ids.Remove(dead);
+            s_Dead.Clear();
+
+            id = s_Next++;
             s_Ids.Add(camera, id);
         }
         return id;
@@ -64,6 +76,7 @@ public class PLOceanVolumePass : CustomPass
     }
 
     readonly Dictionary<Camera, History> _histories = new Dictionary<Camera, History>();
+    readonly List<Camera> _deadCameras = new List<Camera>();
 
     protected override bool executeInSceneView => true;
 
@@ -78,6 +91,20 @@ public class PLOceanVolumePass : CustomPass
 
         if (!_histories.TryGetValue(camera, out var history))
         {
+            // 新相机出现时顺便释放已销毁相机的历史（Scene 视图、预览相机反复开关会留下 RTHandle）
+            foreach (var pair in _histories)
+            {
+                if (pair.Key == null)
+                    _deadCameras.Add(pair.Key);
+            }
+            foreach (var dead in _deadCameras)
+            {
+                RTHandles.Release(_histories[dead].a);
+                RTHandles.Release(_histories[dead].b);
+                _histories.Remove(dead);
+            }
+            _deadCameras.Clear();
+
             history = new History
             {
                 a = PLOceanPassShaderIDs.AllocScreenRT(Vector2.one * 0.5f, "PLOceanVolumeA"),
@@ -143,9 +170,11 @@ public class PLOceanUnderseaPass : CustomPass
         var camera = ctx.hdCamera.camera;
         if (seaMaterial == null || !PLOceanPassShaderIDs.ShouldRender(camera))
             return;
-        float seaLevel = Shader.GetGlobalFloat(PLOceanPassShaderIDs.SeaLevel);
-        // 粗过滤：相机比最大浪高还高时跳过；精确的吃水线由 shader 在近裁剪面上逐像素判断
-        if (camera.transform.position.y > seaLevel + maxWaveHeight)
+        // 粗过滤：相机比最大浪高还高时跳过；精确的吃水线由 shader 在近裁剪面上逐像素判断。
+        // 海平面要扣掉相机正下方的曲率下沉，否则离原点几公里后相机已经在水下了这里还以为在水上
+        var cameraPos = camera.transform.position;
+        float seaLevel = Shader.GetGlobalFloat(PLOceanPassShaderIDs.SeaLevel) - SeaMesh.PlanetDrop(cameraPos.x, cameraPos.z);
+        if (cameraPos.y > seaLevel + maxWaveHeight)
             return;
         int pass = seaMaterial.FindPass("PLOceanUndersea");
         if (pass < 0)

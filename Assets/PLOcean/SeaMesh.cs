@@ -36,12 +36,41 @@ public class SeaMesh : MonoBehaviour
     [Tooltip("包围盒的垂直扩展，给后面的顶点动画留余量，避免被错误剔除")]
     public float boundsHeight = 10f;
 
+    [Header("地球曲率")]
+    [Tooltip("行星半径（米），与 PBR 天空的 Planetary Radius、PLCloud 的 Planet Radius 保持一致。0 = 平面海。" +
+             "球心在 (0, 水面高度 - R, 0)，水面在顶点着色器里按 r² / 2R 下沉，远处自然弯到地平线以下")]
+    [Min(0f)] public float planetRadius = 6378100f;
+
     Mesh _mesh;
     bool _dirty = true;
     MaterialPropertyBlock _props;
+    // 上次生成网格时的参数：只改了曲率 / 包围盒高度时只重算包围盒，不重建整个四叉树
+    (float cell, float inner, int levels, float outer) _builtShape;
+    (float height, float radius) _builtBounds;
+    Bounds _meshBounds;
 
     static readonly int s_SeaLevel = Shader.PropertyToID("_PLOceanSeaLevel");
+    static readonly int s_PlanetRadius = Shader.PropertyToID("_PLOceanPlanetRadius");
     static readonly int s_CameraId = Shader.PropertyToID("_PLOceanCameraId");
+
+    static readonly List<SeaMesh> s_Instances = new List<SeaMesh>();
+
+    /// <summary>当前生效的海面（供 CPU 高度查询读取行星半径）：最后启用、仍然启用的那个</summary>
+    public static SeaMesh Active => s_Instances.Count > 0 ? s_Instances[s_Instances.Count - 1] : null;
+
+    /// <summary>最近一次画海面的游戏 / Scene 相机位置（Camera.main 为空时给 CPU 高度查询选 LOD 用）</summary>
+    public static Vector3 LastCameraPosition { get; private set; }
+    public static bool HasRenderedCamera { get; private set; }
+
+    /// <summary>球面海平面在世界 XZ 处相对平面海平面的下沉量（米），与 shader 的 PlanetDrop 一致</summary>
+    public static float PlanetDrop(float x, float z)
+    {
+        float R = Active != null ? Active.planetRadius : 0f;
+        if (R <= 0f)
+            return 0f;
+        double r2 = (double)x * x + (double)z * z;
+        return (float)(r2 / (R + System.Math.Sqrt(System.Math.Max((double)R * R - r2, 0.0))));
+    }
 
     public Mesh Mesh
     {
@@ -54,7 +83,19 @@ public class SeaMesh : MonoBehaviour
             }
             if (_dirty)
             {
-                new LodMeshBuilder(baseCellSize, innerRadius, lodLevels, outerRadius).Build(_mesh, boundsHeight);
+                var shape = (baseCellSize, innerRadius, lodLevels, outerRadius);
+                if (shape != _builtShape || _mesh.vertexCount == 0)
+                {
+                    new LodMeshBuilder(baseCellSize, innerRadius, lodLevels, outerRadius).Build(_mesh);
+                    _meshBounds = _mesh.bounds;
+                    _builtShape = shape;
+                    _builtBounds = (float.NaN, float.NaN);
+                }
+                if (_builtBounds != (boundsHeight, planetRadius))
+                {
+                    _mesh.bounds = ExpandBounds(_meshBounds, boundsHeight, planetRadius);
+                    _builtBounds = (boundsHeight, planetRadius);
+                }
                 _dirty = false;
             }
             return _mesh;
@@ -63,12 +104,26 @@ public class SeaMesh : MonoBehaviour
 
     void OnEnable()
     {
+        s_Instances.Remove(this);
+        s_Instances.Add(this);
         RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
     }
 
     void OnDisable()
     {
+        s_Instances.Remove(this);
         RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+        // 没有海面了：水下 Pass 和云不能再用旧的海平面 / 曲率
+        if (Active == null)
+            Shader.SetGlobalFloat(s_PlanetRadius, 0f);
+        else
+            Active.SetGlobals();
+    }
+
+    void SetGlobals()
+    {
+        Shader.SetGlobalFloat(s_SeaLevel, transform.position.y);
+        Shader.SetGlobalFloat(s_PlanetRadius, planetRadius);
     }
 
     void OnDestroy()
@@ -100,8 +155,14 @@ public class SeaMesh : MonoBehaviour
         center.z = Mathf.Round(center.z / step) * step;
         center.y = transform.position.y;
 
+        if (cam.cameraType == CameraType.Game || cam.cameraType == CameraType.SceneView)
+        {
+            LastCameraPosition = cam.transform.position;
+            HasRenderedCamera = true;
+        }
+
         // 水面高度给水下 Pass 用；相机编号让水面只使用属于自己相机的体积缓冲
-        Shader.SetGlobalFloat(s_SeaLevel, transform.position.y);
+        SetGlobals();
         _props ??= new MaterialPropertyBlock();
         _props.SetFloat(s_CameraId, PLOceanCameraIds.Get(cam));
 
@@ -117,6 +178,16 @@ public class SeaMesh : MonoBehaviour
             null,
             LightProbeUsage.Off,
             null);
+    }
+
+    // 曲率下沉发生在顶点着色器里（以世界原点为基准），包围盒要向下包住网格边缘的最大下沉量。
+    // 多留 20 km 的余量，相机离开原点 20 km 以内都不会被错误剔除
+    static Bounds ExpandBounds(Bounds b, float boundsHeight, float planetRadius)
+    {
+        float edge = Mathf.Max(b.extents.x, b.extents.z) * 1.415f + 20000f;
+        float drop = planetRadius > 0f ? edge * edge / (2f * planetRadius) : 0f;
+        b.SetMinMax(b.min - new Vector3(0f, boundsHeight + drop, 0f), b.max + new Vector3(0f, boundsHeight, 0f));
+        return b;
     }
 
     /// <summary>
@@ -154,7 +225,7 @@ public class SeaMesh : MonoBehaviour
             _halfExtent = _rootCount * rootSize * 0.5;
         }
 
-        public void Build(Mesh mesh, float boundsHeight)
+        public void Build(Mesh mesh)
         {
             Generate();
 
@@ -177,10 +248,6 @@ public class SeaMesh : MonoBehaviour
             mesh.SetUVs(0, uvs);
             mesh.SetTriangles(_indices, 0);
             mesh.RecalculateBounds();
-
-            Bounds b = mesh.bounds;
-            b.Expand(new Vector3(0f, boundsHeight * 2f, 0f));
-            mesh.bounds = b;
         }
 
         // 只生成顶点和索引，不触碰 Mesh 对象
